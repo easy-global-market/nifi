@@ -89,6 +89,7 @@ import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.oauth2.OAuth2AccessTokenProvider;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.DataUnit;
 import org.apache.nifi.processor.ProcessContext;
@@ -482,6 +483,13 @@ public class InvokeHTTP extends AbstractProcessor {
             .allowableValues("True", "False")
             .build();
 
+    public static final PropertyDescriptor OAUTH2_ACCESS_TOKEN_PROVIDER = new PropertyDescriptor.Builder()
+            .name("oauth2-access-token-provider")
+            .displayName("OAuth2 Access Token provider")
+            .identifiesControllerService(OAuth2AccessTokenProvider.class)
+            .required(false)
+            .build();
+
     private static final ProxySpec[] PROXY_SPECS = {ProxySpec.HTTP_AUTH, ProxySpec.SOCKS};
     public static final PropertyDescriptor PROXY_CONFIGURATION_SERVICE
             = ProxyConfiguration.createProxyConfigPropertyDescriptor(true, PROXY_SPECS);
@@ -501,6 +509,7 @@ public class InvokeHTTP extends AbstractProcessor {
             PROP_USERAGENT,
             PROP_BASIC_AUTH_USERNAME,
             PROP_BASIC_AUTH_PASSWORD,
+            OAUTH2_ACCESS_TOKEN_PROVIDER,
             PROXY_CONFIGURATION_SERVICE,
             PROP_PROXY_HOST,
             PROP_PROXY_PORT,
@@ -1110,6 +1119,11 @@ public class InvokeHTTP extends AbstractProcessor {
         if (context.getProperty(PROP_DATE_HEADER).asBoolean()) {
             final ZonedDateTime universalCoordinatedTimeNow = ZonedDateTime.now(ZoneOffset.UTC);
             requestBuilder.addHeader("Date", RFC_2616_DATE_TIME.format(universalCoordinatedTimeNow));
+        }
+
+        if (context.getProperty(OAUTH2_ACCESS_TOKEN_PROVIDER).isSet()) {
+            OAuth2AccessTokenProvider oauth2AccessTokenProvider = context.getProperty(OAUTH2_ACCESS_TOKEN_PROVIDER).asControllerService(OAuth2AccessTokenProvider.class);
+            requestBuilder.addHeader("Authorization", "Bearer " + oauth2AccessTokenProvider.getAccessToken());
         }
 
         for (String headerKey : dynamicPropertyNames) {
