@@ -160,7 +160,7 @@ public class OAuth2TokenProviderImplTest {
         assertNull(ex);
         assertNotNull(token);
         assertEquals("access token", token.getAccessToken());
-        assertEquals(5300, token.getExpires());
+        assertEquals(5300, token.getExpiresIn());
         assertEquals("BEARER", token.getTokenType());
         assertFalse(token.isExpired());
     }
