@@ -23,7 +23,6 @@ import org.apache.nifi.security.util.crypto.scrypt.Scrypt
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
-import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import org.slf4j.Logger
@@ -36,9 +35,12 @@ import javax.crypto.spec.SecretKeySpec
 import java.security.SecureRandom
 import java.security.Security
 
-import static groovy.test.GroovyAssert.shouldFail
-import static org.junit.Assert.assertTrue
-import static org.junit.jupiter.api.Assumptions.assumeTrue
+import static org.junit.jupiter.api.Assertions.assertArrayEquals
+import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNotNull
+import static org.junit.jupiter.api.Assertions.assertThrows
+import static org.junit.jupiter.api.Assertions.assertTrue
 
 class ScryptCipherProviderGroovyTest {
     private static final Logger logger = LoggerFactory.getLogger(ScryptCipherProviderGroovyTest.class)
@@ -63,11 +65,7 @@ class ScryptCipherProviderGroovyTest {
             logger.info("[${name?.toUpperCase()}] ${(args as List).join(" ")}")
         }
 
-        if (CipherUtility.isUnlimitedStrengthCryptoSupported()) {
-            AES_KEY_LENGTHS = [128, 192, 256]
-        } else {
-            AES_KEY_LENGTHS = [128]
-        }
+        AES_KEY_LENGTHS = [128, 192, 256]
     }
 
     @BeforeEach
@@ -100,7 +98,7 @@ class ScryptCipherProviderGroovyTest {
             logger.info("Recovered: ${recovered}")
 
             // Assert
-            assert PLAINTEXT.equals(recovered)
+            assertEquals(PLAINTEXT, recovered)
         }
     }
 
@@ -128,16 +126,13 @@ class ScryptCipherProviderGroovyTest {
             logger.info("Recovered: ${recovered}")
 
             // Assert
-            assert PLAINTEXT.equals(recovered)
+            assertEquals(PLAINTEXT, recovered)
         }
     }
 
     @Test
     void testGetCipherWithUnlimitedStrengthShouldBeInternallyConsistent() throws Exception {
         // Arrange
-        assumeTrue(CipherUtility.isUnlimitedStrengthCryptoSupported(),
-                "Test is being skipped due to this JVM lacking JCE Unlimited Strength Jurisdiction Policy file.")
-
         final String PASSWORD = "shortPassword"
         final byte[] SALT = cipherProvider.generateSalt()
 
@@ -161,7 +156,7 @@ class ScryptCipherProviderGroovyTest {
             logger.info("Recovered: ${recovered}")
 
             // Assert
-            assert PLAINTEXT.equals(recovered)
+            assertEquals(PLAINTEXT, recovered)
         }
     }
 
@@ -198,9 +193,9 @@ class ScryptCipherProviderGroovyTest {
         byte[] rubyCipherBytes = rubyCipher.doFinal(PLAINTEXT.bytes)
         logger.sanity("Created cipher text: ${Hex.encodeHexString(rubyCipherBytes)}")
         rubyCipher.init(Cipher.DECRYPT_MODE, rubyKey, ivSpec)
-        assert rubyCipher.doFinal(rubyCipherBytes) == PLAINTEXT.bytes
+        assertArrayEquals(PLAINTEXT.bytes, rubyCipher.doFinal(rubyCipherBytes))
         logger.sanity("Decrypted generated cipher text successfully")
-        assert rubyCipher.doFinal(cipherBytes) == PLAINTEXT.bytes
+        assertArrayEquals(PLAINTEXT.bytes, rubyCipher.doFinal(cipherBytes))
         logger.sanity("Decrypted external cipher text successfully")
 
         // n$r$p$hex_salt_SL$hex_hash_HL
@@ -223,7 +218,7 @@ class ScryptCipherProviderGroovyTest {
         // Convert hash from hex to Base64
         String base64Hash = CipherUtility.encodeBase64NoPadding(Hex.decodeHex(hashHex as char[]))
         logger.info("Converted hash from hex ${hashHex} to Base64 ${base64Hash}")
-        assert Hex.encodeHexString(Base64.decodeBase64(base64Hash)) == hashHex
+        assertEquals(hashHex, Hex.encodeHexString(Base64.decodeBase64(base64Hash)))
 
         logger.info("Using algorithm: ${encryptionMethod.getAlgorithm()}")
         logger.info("External cipher text: ${CIPHER_TEXT} ${cipherBytes.length}")
@@ -235,7 +230,7 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Recovered: ${recovered}")
 
         // Assert
-        assert PLAINTEXT.equals(recovered)
+        assertEquals(PLAINTEXT, recovered)
     }
 
     @Test
@@ -281,7 +276,7 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Recovered: ${recovered}")
 
         // Assert
-        assert PLAINTEXT.equals(recovered)
+        assertEquals(PLAINTEXT, recovered)
     }
 
     @Test
@@ -299,13 +294,12 @@ class ScryptCipherProviderGroovyTest {
         INVALID_SALTS.each { String salt ->
             logger.info("Checking salt ${salt}")
 
-            def msg = shouldFail(IllegalArgumentException) {
-                Cipher cipher = cipherProvider.getCipher(encryptionMethod, PASSWORD, salt.bytes, DEFAULT_KEY_LENGTH, true)
-            }
-            logger.expected(msg)
+            IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                    () -> cipherProvider.getCipher(encryptionMethod, PASSWORD, salt.bytes, DEFAULT_KEY_LENGTH, true))
+            logger.warn(iae.getMessage())
 
             // Assert
-            assert msg =~ LENGTH_MESSAGE
+            assertTrue(iae.getMessage().contains(LENGTH_MESSAGE))
         }
     }
 
@@ -326,7 +320,7 @@ class ScryptCipherProviderGroovyTest {
             Cipher cipher = cipherProvider.getCipher(encryptionMethod, PASSWORD, salt.bytes, DEFAULT_KEY_LENGTH, true)
 
             // Assert
-            assert cipher
+            assertNotNull(cipher)
         }
     }
 
@@ -339,13 +333,12 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Using algorithm: ${encryptionMethod.getAlgorithm()}")
 
         // Act
-        def msg = shouldFail(IllegalArgumentException) {
-            Cipher cipher = cipherProvider.getCipher(encryptionMethod, PASSWORD, new byte[0], DEFAULT_KEY_LENGTH, true)
-        }
-        logger.expected(msg)
+        IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                () -> cipherProvider.getCipher(encryptionMethod, PASSWORD, new byte[0], DEFAULT_KEY_LENGTH, true))
+        logger.warn(iae.getMessage())
 
         // Assert
-        assert msg =~ "The salt cannot be empty\\. To generate a salt, use ScryptCipherProvider#generateSalt"
+        assertTrue(iae.getMessage().contains("The salt cannot be empty. To generate a salt, use ScryptCipherProvider#generateSalt"))
     }
 
     @Test
@@ -366,13 +359,12 @@ class ScryptCipherProviderGroovyTest {
             byte[] cipherBytes = cipher.doFinal(PLAINTEXT.getBytes("UTF-8"))
             logger.info("Cipher text: ${Hex.encodeHexString(cipherBytes)} ${cipherBytes.length}")
 
-            def msg = shouldFail(IllegalArgumentException) {
-                cipher = cipherProvider.getCipher(em, PASSWORD, SALT, DEFAULT_KEY_LENGTH, false)
-            }
-            logger.expected(msg)
+            IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                    () -> cipherProvider.getCipher(em, PASSWORD, SALT, DEFAULT_KEY_LENGTH, false))
+            logger.warn(iae.getMessage())
 
             // Assert
-            assert msg =~ "Cannot decrypt without a valid IV"
+            assertTrue(iae.getMessage().contains("Cannot decrypt without a valid IV"))
         }
     }
 
@@ -403,7 +395,7 @@ class ScryptCipherProviderGroovyTest {
             logger.info("Recovered: ${recovered}")
 
             // Assert
-            assert PLAINTEXT.equals(recovered)
+            assertEquals(PLAINTEXT, recovered)
         }
     }
 
@@ -424,13 +416,12 @@ class ScryptCipherProviderGroovyTest {
             logger.info("Using algorithm: ${encryptionMethod.getAlgorithm()} with key length ${keyLength}")
 
             // Initialize a cipher for encryption
-            def msg = shouldFail(IllegalArgumentException) {
-                Cipher cipher = cipherProvider.getCipher(encryptionMethod, PASSWORD, SALT, IV, keyLength, true)
-            }
-            logger.expected(msg)
+            IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                    () -> cipherProvider.getCipher(encryptionMethod, PASSWORD, SALT, IV, keyLength, true))
+            logger.warn(iae.getMessage())
 
             // Assert
-            assert msg =~ "${keyLength} is not a valid key length for AES"
+            assertTrue(iae.getMessage().contains(keyLength + " is not a valid key length for AES"))
         }
     }
 
@@ -443,12 +434,11 @@ class ScryptCipherProviderGroovyTest {
         EncryptionMethod encryptionMethod = EncryptionMethod.AES_CBC
 
         // Act
-        def msg = shouldFail(IllegalArgumentException) {
-            cipherProvider.getCipher(encryptionMethod, badPassword, salt, DEFAULT_KEY_LENGTH, true)
-        }
+        IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                ()-> cipherProvider.getCipher(encryptionMethod, badPassword, salt, DEFAULT_KEY_LENGTH, true))
 
         // Assert
-        assert msg =~ "Encryption with an empty password is not supported"
+        assertTrue(iae.getMessage().contains("Encryption with an empty password is not supported"))
     }
 
     @Test
@@ -464,9 +454,9 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Salt: ${salt}")
 
         // Assert
-        assert salt =~ "^(?i)\\\$s0\\\$[a-f0-9]{5,16}\\\$"
+        assertTrue((salt =~ "^(?i)\\\$s0\\\$[a-f0-9]{5,16}\\\$").find())
         String params = Scrypt.encodeParams(n, r, p)
-        assert salt.contains("\$${params}\$")
+        assertTrue(salt.contains("\$${params}\$"))
     }
 
     @Test
@@ -489,10 +479,10 @@ class ScryptCipherProviderGroovyTest {
         cipherProvider.parseSalt(FORMATTED_SALT, rawSalt, params)
 
         // Assert
-        assert rawSalt == EXPECTED_RAW_SALT
-        assert params[0] == EXPECTED_N
-        assert params[1] == EXPECTED_R
-        assert params[2] == EXPECTED_P
+        assertArrayEquals(EXPECTED_RAW_SALT, rawSalt)
+        assertEquals(EXPECTED_N, params[0])
+        assertEquals(EXPECTED_R, params[1])
+        assertEquals(EXPECTED_P, params[2])
     }
 
     @Test
@@ -505,7 +495,7 @@ class ScryptCipherProviderGroovyTest {
         boolean valid = ScryptCipherProvider.isPValid(r, p)
 
         // Assert
-        assert valid
+        assertTrue(valid)
     }
 
     @Test
@@ -513,19 +503,12 @@ class ScryptCipherProviderGroovyTest {
         // Arrange
         // The p upper bound is calculated with the formula below, when r = 8:
         // pBoundary = ((Math.pow(2,32))-1) * (32.0/(r * 128)), where pBoundary = 134217727.96875;
-        Map costParameters = [8:134217729, 128:8388608, 4096: 0]
+        Map<Integer, Integer> costParameters = [8:134217729, 128:8388608, 4096: 0]
 
-        // Act
-        def results = costParameters.collectEntries { r, p ->
-            def isValid = ScryptCipherProvider.isPValid(r, p)
-            [r, isValid]
-        }
-
-        // Assert
-        results.each { r, isPValid ->
-            logger.info("For r ${r}, p is ${isPValid}")
-            assert !isPValid
-        }
+        // Act and Assert
+        costParameters.entrySet().forEach(entry -> {
+            assertFalse(ScryptCipherProvider.isPValid(entry.getKey(), entry.getValue()))
+        })
     }
 
     @Test
@@ -537,7 +520,7 @@ class ScryptCipherProviderGroovyTest {
         boolean valid = ScryptCipherProvider.isRValid(r)
 
         // Assert
-        assert valid
+        assertTrue(valid)
     }
 
     @Test
@@ -549,7 +532,7 @@ class ScryptCipherProviderGroovyTest {
         boolean valid = ScryptCipherProvider.isRValid(r)
 
         // Assert
-        assert !valid
+        assertFalse(valid)
     }
 
     @Test
@@ -563,7 +546,7 @@ class ScryptCipherProviderGroovyTest {
         ScryptCipherProvider testCipherProvider = new ScryptCipherProvider(n, r, p)
 
         // Assert
-        assert testCipherProvider
+        assertNotNull(testCipherProvider)
     }
 
     @Test
@@ -574,13 +557,12 @@ class ScryptCipherProviderGroovyTest {
         final int p = 0
 
         // Act
-        def msg = shouldFail(IllegalArgumentException) {
-            ScryptCipherProvider testCipherProvider = new ScryptCipherProvider(n, r, p)
-        }
-        logger.expected(msg)
+        IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                () -> new ScryptCipherProvider(n, r, p))
+        logger.warn(iae.getMessage())
 
         // Assert
-        assert msg =~ "Invalid p value exceeds p boundary"
+        assertTrue(iae.getMessage().contains("Invalid p value exceeds p boundary"))
     }
 
     @Test
@@ -591,13 +573,12 @@ class ScryptCipherProviderGroovyTest {
         final int p = 0
 
         // Act
-        def msg = shouldFail(IllegalArgumentException) {
-            ScryptCipherProvider testCipherProvider = new ScryptCipherProvider(n, r, p)
-        }
-        logger.expected(msg)
+        IllegalArgumentException iae = assertThrows(IllegalArgumentException.class,
+                () -> new ScryptCipherProvider(n, r, p))
+        logger.warn(iae.getMessage())
 
         // Assert
-        assert msg =~ "Invalid r value; must be greater than 0"
+        assertTrue(iae.getMessage().contains("Invalid r value; must be greater than 0"))
     }
 
     @Test
@@ -610,7 +591,7 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Is Scrypt salt: ${isScryptSalt}")
 
         // Assert
-        assert isScryptSalt
+        assertTrue(isScryptSalt)
     }
 
     @EnabledIfSystemProperty(named = "nifi.test.unstable", matches = "true",
@@ -633,7 +614,7 @@ class ScryptCipherProviderGroovyTest {
         logger.info("Determined minimum safe parameters to be N=${minimumN}, r=${minimumR}, p=${minimumP}")
 
         // Assert
-        assertTrue("The default parameters for ScryptCipherProvider are too weak. Please update the default values to a stronger level.", n >= minimumN)
+        assertTrue(n >= minimumN, "The default parameters for ScryptCipherProvider are too weak. Please update the default values to a stronger level.")
     }
 
     /**
@@ -653,7 +634,7 @@ class ScryptCipherProviderGroovyTest {
         int n = 2**4
         int dkLen = 128
 
-        assert Scrypt.calculateExpectedMemory(n, r, p) <= maxHeapSize
+        assertTrue(Scrypt.calculateExpectedMemory(n, r, p) <= maxHeapSize)
 
         byte[] salt = new byte[Scrypt.defaultSaltLength]
         new SecureRandom().nextBytes(salt)

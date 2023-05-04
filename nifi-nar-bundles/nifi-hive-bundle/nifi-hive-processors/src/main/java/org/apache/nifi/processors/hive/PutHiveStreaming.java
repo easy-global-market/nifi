@@ -17,6 +17,7 @@
 package org.apache.nifi.processors.hive;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.avro.AvroRuntimeException;
 import org.apache.avro.file.CodecFactory;
 import org.apache.avro.file.DataFileConstants;
 import org.apache.avro.file.DataFileStream;
@@ -35,6 +36,7 @@ import org.apache.nifi.annotation.behavior.RequiresInstanceClassLoading;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.DeprecationNotice;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
@@ -116,6 +118,7 @@ import java.util.regex.Pattern;
                 + "and 'failure' relationships, and contains the target table name in 'databaseName.tableName' format.")
 })
 @RequiresInstanceClassLoading
+@DeprecationNotice(classNames = "org.apache.nifi.processors.hive.PutHive3Streaming")
 public class PutHiveStreaming extends AbstractSessionFactoryProcessor {
     private static final String ALLOW_EXPLICIT_KEYTAB = "NIFI_ALLOW_EXPLICIT_KEYTAB";
 
@@ -776,6 +779,7 @@ public class PutHiveStreaming extends AbstractSessionFactoryProcessor {
                 throw s;
 
             } catch (IllegalArgumentException
+                    | AvroRuntimeException
                     | HiveWriter.WriteFailure
                     | SerializationError inputError) {
 

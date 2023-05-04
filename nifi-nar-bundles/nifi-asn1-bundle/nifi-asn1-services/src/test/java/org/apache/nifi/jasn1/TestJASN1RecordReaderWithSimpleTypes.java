@@ -46,6 +46,7 @@ import org.apache.nifi.serialization.record.RecordSchema;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -105,11 +106,11 @@ public class TestJASN1RecordReaderWithSimpleTypes implements JASN1ReadRecordTest
         berValue.setValue(new BerBitString(new boolean[]{false, true, false, false, true, true, true, true, false, true, false, false}));
 
         Map<String, Object> expectedValues = new HashMap<String, Object>() {{
-            put("value", new boolean[]{false, true, false, false, true, true, true, true, false, true, false, false});
+            put("value", "010011110100");
         }};
 
         RecordSchema expectedSchema = new SimpleRecordSchema(Arrays.asList(
-                new RecordField("value", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BOOLEAN.getDataType())))
+                new RecordField("value", RecordFieldType.STRING.getDataType()))
         );
 
         testReadRecord(dataFile, berValue, expectedValues, expectedSchema);
@@ -156,7 +157,7 @@ public class TestJASN1RecordReaderWithSimpleTypes implements JASN1ReadRecordTest
         String dataFile = "target/bmpstring_wrapper.dat";
 
         BMPStringWrapper berValue = new BMPStringWrapper();
-        berValue.setValue(new BerBMPString("Some UTF-8 String. こんにちは世界。".getBytes()));
+        berValue.setValue(new BerBMPString("Some UTF-8 String. こんにちは世界。".getBytes(StandardCharsets.UTF_8)));
 
         Map<String, Object> expectedValues = new HashMap<String, Object>() {{
             put("value", "Some UTF-8 String. こんにちは世界。");

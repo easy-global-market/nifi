@@ -16,44 +16,37 @@
  */
 package org.apache.nifi.documentation.html;
 
-import java.io.IOException;
-import java.io.StringReader;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import org.junit.Assert;
-import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 
-/**
- * A helper class to validate xml documents.
- *
- *
- */
+import org.apache.nifi.xml.processing.parsers.DocumentProvider;
+import org.apache.nifi.xml.processing.parsers.StandardDocumentProvider;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 public class XmlValidator {
+    private static final String DOCTYPE = "<!DOCTYPE html>";
+
+    private static final String EMPTY = "";
 
     /**
-     * Asserts a failure if the provided XML is not valid. <strong>This method does
-     * not use the "safe" {@link DocumentBuilderFactory} from
-     * {@code XmlUtils#createSafeDocumentBuilder(Schema, boolean)} because it checks
-     * generated documentation which contains a doctype. </strong>
+     * Asserts a failure if the provided XHTML is not valid
      *
      * @param xml the XML to validate
      */
     public static void assertXmlValid(String xml) {
-        try {
-            final DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-            dbf.setNamespaceAware(true);
-            dbf.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
-        } catch (SAXException | IOException | ParserConfigurationException e) {
-            Assert.fail(e.getMessage());
-        }
+        final String html = xml.replace(DOCTYPE, EMPTY);
+        final DocumentProvider provider = new StandardDocumentProvider();
+        assertDoesNotThrow(() -> provider.parse(new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))));
     }
 
     public static void assertContains(String original, String subword) {
-        Assert.assertTrue(original + " did not contain: " + subword, original.contains(subword));
+        assertTrue(original.contains(subword), original + " did not contain: " + subword);
     }
 
     public static void assertNotContains(String original, String subword) {
-        Assert.assertFalse(original + " did contain: " + subword, original.contains(subword));
+        assertFalse(original.contains(subword), original + " did contain: " + subword);
     }
 }

@@ -28,10 +28,10 @@ import org.apache.nifi.cluster.manager.NodeResponse;
 import org.apache.nifi.components.ConfigurableComponent;
 import org.apache.nifi.controller.ScheduledState;
 import org.apache.nifi.controller.service.ControllerServiceState;
+import org.apache.nifi.flow.VersionedParameterContext;
 import org.apache.nifi.flow.VersionedProcessGroup;
 import org.apache.nifi.registry.flow.FlowRegistryUtils;
-import org.apache.nifi.registry.flow.VersionedFlowSnapshot;
-import org.apache.nifi.flow.VersionedParameterContext;
+import org.apache.nifi.registry.flow.RegisteredFlowSnapshot;
 import org.apache.nifi.web.NiFiServiceFacade;
 import org.apache.nifi.web.ResourceNotFoundException;
 import org.apache.nifi.web.ResumeFlowException;
@@ -53,6 +53,7 @@ import org.apache.nifi.web.api.entity.PortEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupDescriptorEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
+import org.apache.nifi.web.api.entity.VersionControlInformationEntity;
 import org.apache.nifi.web.util.AffectedComponentUtils;
 import org.apache.nifi.web.util.CancellableTimedPause;
 import org.apache.nifi.web.util.ComponentLifecycle;
@@ -105,14 +106,14 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
      * Perform actual flow update
      */
     protected abstract ProcessGroupEntity performUpdateFlow(final String groupId, final Revision revision, final T requestEntity,
-                                                            final VersionedFlowSnapshot flowSnapshot, final String idGenerationSeed,
+                                                            final RegisteredFlowSnapshot flowSnapshot, final String idGenerationSeed,
                                                             final boolean verifyNotModified, final boolean updateDescendantVersionedFlows);
 
     /**
      * Create the entity that is passed for update flow replication
      */
     protected abstract Entity createReplicateUpdateFlowEntity(final Revision revision, final T requestEntity,
-                                                              final VersionedFlowSnapshot flowSnapshot);
+                                                              final RegisteredFlowSnapshot flowSnapshot);
 
     /**
      * Create the entity that captures the status and result of an update request
@@ -139,7 +140,7 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
      */
     protected Response initiateFlowUpdate(final String groupId, final T requestEntity, final boolean allowDirtyFlowUpdate,
                                           final String requestType, final String replicateUriPath,
-                                          final Supplier<VersionedFlowSnapshot> flowSnapshotSupplier) {
+                                          final Supplier<RegisteredFlowSnapshot> flowSnapshotSupplier) {
         // Verify the request
         final RevisionDTO revisionDto = requestEntity.getProcessGroupRevision();
         if (revisionDto == null) {
@@ -184,7 +185,7 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
         // 13. Re-Start all Processors, Funnels, Ports that are affected and not removed.
 
         // Step 0: Obtain the versioned flow snapshot to use for the update
-        final VersionedFlowSnapshot flowSnapshot = flowSnapshotSupplier.get();
+        final RegisteredFlowSnapshot flowSnapshot = flowSnapshotSupplier.get();
 
         // The new flow may not contain the same versions of components in existing flow. As a result, we need to update
         // the flow snapshot to contain compatible bundles.
@@ -192,6 +193,9 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
 
         // If there are any Controller Services referenced that are inherited from the parent group, resolve those to point to the appropriate Controller Service, if we are able to.
         serviceFacade.resolveInheritedControllerServices(flowSnapshot, groupId, user);
+
+        // If there are any Parameter Providers referenced by Parameter Contexts, resolve these to point to the appropriate Parameter Provider, if we are able to.
+        serviceFacade.resolveParameterProviders(flowSnapshot, user);
 
         // Step 1: Determine which components will be affected by updating the flow
         final Set<AffectedComponentEntity> affectedComponents = serviceFacade.getComponentsAffectedByFlowUpdate(groupId, flowSnapshot);
@@ -218,14 +222,13 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
 
     /**
      * Authorize read/write permissions for the given user on every component of the given flow in support of flow update.
-     *
-     * @param lookup        A lookup instance to use for retrieving components for authorization purposes
+     *  @param lookup        A lookup instance to use for retrieving components for authorization purposes
      * @param user          the user to authorize
      * @param groupId       the id of the process group being evaluated
      * @param flowSnapshot  the new flow contents to examine for restricted components
      */
     protected void authorizeFlowUpdate(final AuthorizableLookup lookup, final NiFiUser user, final String groupId,
-                                       final VersionedFlowSnapshot flowSnapshot) {
+                                       final RegisteredFlowSnapshot flowSnapshot) {
         // Step 2: Verify READ and WRITE permissions for user, for every component.
         final ProcessGroupAuthorizable groupAuthorizable = lookup.getProcessGroup(groupId);
         authorizeProcessGroup(groupAuthorizable, authorizer, lookup, RequestAction.READ, true,
@@ -319,7 +322,7 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
     private void updateFlow(final String groupId, final ComponentLifecycle componentLifecycle, final URI requestUri,
                             final Set<AffectedComponentEntity> affectedComponents, final boolean replicateRequest,
                             final String replicateUriPath, final Revision revision, final T requestEntity,
-                            final VersionedFlowSnapshot flowSnapshot, final AsynchronousWebRequest<T, T> asyncRequest,
+                            final RegisteredFlowSnapshot flowSnapshot, final AsynchronousWebRequest<T, T> asyncRequest,
                             final String idGenerationSeed, final boolean allowDirtyFlowUpdate)
             throws LifecycleManagementException, ResumeFlowException {
 
@@ -373,47 +376,32 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
         }
         asyncRequest.markStepComplete();
 
+        // Get the Original Flow Snapshot in case we fail to update and need to rollback
+        final VersionControlInformationEntity vciEntity = serviceFacade.getVersionControlInformation(groupId);
+        final RegisteredFlowSnapshot originalFlowSnapshot = serviceFacade.getVersionedFlowSnapshot(vciEntity.getVersionControlInformation(), true);
+
         try {
             if (replicateRequest) {
                 // If replicating request, steps 9-11 are performed on each node individually
+                final URI replicateUri = buildUri(requestUri, replicateUriPath, null);
                 final NiFiUser user = NiFiUserUtils.getNiFiUser();
 
-                URI replicateUri = null;
                 try {
-                    replicateUri = new URI(requestUri.getScheme(), requestUri.getUserInfo(), requestUri.getHost(), requestUri.getPort(),
-                            replicateUriPath, null, requestUri.getFragment());
-                } catch (URISyntaxException e) {
-                    throw new RuntimeException(e);
-                }
-
-                final Map<String, String> headers = new HashMap<>();
-                headers.put("content-type", MediaType.APPLICATION_JSON);
-
-                // each concrete class creates its own type of entity for replication
-                final Entity replicateEntity = createReplicateUpdateFlowEntity(revision, requestEntity, flowSnapshot);
-
-                final NodeResponse clusterResponse;
-                try {
-                    logger.debug("Replicating PUT request to {} for user {}", replicateUri, user);
-
-                    if (getReplicationTarget() == ReplicationTarget.CLUSTER_NODES) {
-                        clusterResponse = getRequestReplicator().replicate(user, HttpMethod.PUT, replicateUri, replicateEntity, headers).awaitMergedResponse();
+                    final NodeResponse clusterResponse = replicateFlowUpdateRequest(replicateUri, user, requestEntity, revision, flowSnapshot);
+                    verifyResponseCode(clusterResponse, replicateUri, user, "update");
+                } catch (final Exception e) {
+                    if (originalFlowSnapshot == null) {
+                        logger.debug("Failed to update flow but could not determine original flow to rollback to so will not make any attempt to revert the flow.");
                     } else {
-                        clusterResponse = getRequestReplicator().forwardToCoordinator(
-                                getClusterCoordinatorNode(), user, HttpMethod.PUT, replicateUri, replicateEntity, headers).awaitMergedResponse();
+                        try {
+                            final NodeResponse rollbackResponse = replicateFlowUpdateRequest(replicateUri, user, requestEntity, revision, originalFlowSnapshot);
+                            verifyResponseCode(rollbackResponse, replicateUri, user, "rollback");
+                        } catch (final Exception inner) {
+                            e.addSuppressed(inner);
+                        }
                     }
-                } catch (final InterruptedException ie) {
-                    logger.warn("Interrupted while replicating PUT request to {} for user {}", replicateUri, user);
-                    Thread.currentThread().interrupt();
-                    throw new LifecycleManagementException("Interrupted while updating flows across cluster", ie);
-                }
 
-                final int updateFlowStatus = clusterResponse.getStatus();
-                if (updateFlowStatus != Status.OK.getStatusCode()) {
-                    final String explanation = getResponseEntity(clusterResponse, String.class);
-                    logger.error("Failed to update flow across cluster when replicating PUT request to {} for user {}. Received {} response with explanation: {}",
-                            replicateUri, user, updateFlowStatus, explanation);
-                    throw new LifecycleManagementException("Failed to update Flow on all nodes in cluster due to " + explanation);
+                    throw e;
                 }
             } else {
                 // Step 9: Ensure that if any connection exists in the flow and does not exist in the proposed snapshot,
@@ -423,7 +411,27 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
 
                 // Step 10-11. Update Process Group to the new flow and update variable registry with any Variables that were added or removed.
                 // Each concrete class defines its own update flow functionality
-                performUpdateFlow(groupId, revision, requestEntity, flowSnapshot, idGenerationSeed, !allowDirtyFlowUpdate, true);
+                try {
+                    performUpdateFlow(groupId, revision, requestEntity, flowSnapshot, idGenerationSeed, !allowDirtyFlowUpdate, true);
+                } catch (final Exception e) {
+                    // If clustered, just throw the original Exception.
+                    // Otherwise, rollback the flow update. We do not perform the rollback if clustered because
+                    // we want this to be handled at a higher level, allowing the request to replace our flow version to come from the coordinator
+                    // if any node fails to perform the update.
+                    if (isClustered()) {
+                        throw e;
+                    }
+
+                    // Rollback the update to the original flow snapshot. If there's any Exception, add it as a Suppressed Exception to the original so
+                    // that it can be logged but not overtake the original Exception as the cause.
+                    try {
+                        performUpdateFlow(groupId, revision, requestEntity, originalFlowSnapshot, idGenerationSeed, false, true);
+                    } catch (final Exception inner) {
+                        e.addSuppressed(inner);
+                    }
+
+                    throw e;
+                }
             }
         } finally {
             if (!asyncRequest.isCancelled()) {
@@ -526,6 +534,53 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
         }
 
         asyncRequest.setCancelCallback(null);
+    }
+
+    private URI buildUri(final URI requestUri, final String path, final String query) {
+        try {
+            return new URI(requestUri.getScheme(), requestUri.getUserInfo(), requestUri.getHost(), requestUri.getPort(),
+                path, query, requestUri.getFragment());
+        } catch (final URISyntaxException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void verifyResponseCode(final NodeResponse response, final URI uri, final NiFiUser user, final String actionDescription) throws LifecycleManagementException {
+        final int updateFlowStatus = response.getStatus();
+        if (updateFlowStatus != Status.OK.getStatusCode()) {
+            final String explanation = getResponseEntity(response, String.class);
+            logger.error("Failed to {} flow update across cluster when replicating PUT request to {} for user {}. Received {} response with explanation: {}",
+                actionDescription, uri, user, updateFlowStatus, explanation);
+            throw new LifecycleManagementException("Failed to " + actionDescription + " flow on all nodes in cluster due to " + explanation);
+        }
+    }
+
+    private NodeResponse replicateFlowUpdateRequest(final URI replicateUri, final NiFiUser user, final T requestEntity, final Revision revision, final RegisteredFlowSnapshot flowSnapshot)
+                throws LifecycleManagementException {
+
+        final Map<String, String> headers = new HashMap<>();
+        headers.put("content-type", MediaType.APPLICATION_JSON);
+
+        // each concrete class creates its own type of entity for replication
+        final Entity replicateEntity = createReplicateUpdateFlowEntity(revision, requestEntity, flowSnapshot);
+
+        final NodeResponse clusterResponse;
+        try {
+            logger.debug("Replicating PUT request to {} for user {}", replicateUri, user);
+
+            if (getReplicationTarget() == ReplicationTarget.CLUSTER_NODES) {
+                clusterResponse = getRequestReplicator().replicate(user, HttpMethod.PUT, replicateUri, replicateEntity, headers).awaitMergedResponse();
+            } else {
+                clusterResponse = getRequestReplicator().forwardToCoordinator(
+                    getClusterCoordinatorNode(), user, HttpMethod.PUT, replicateUri, replicateEntity, headers).awaitMergedResponse();
+            }
+        } catch (final InterruptedException ie) {
+            logger.warn("Interrupted while replicating PUT request to {} for user {}", replicateUri, user);
+            Thread.currentThread().interrupt();
+            throw new LifecycleManagementException("Interrupted while updating flows across cluster", ie);
+        }
+
+        return clusterResponse;
     }
 
     /**
@@ -685,12 +740,12 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
         private final String replicateUriPath;
         private final Set<AffectedComponentEntity> affectedComponents;
         private final boolean replicateRequest;
-        private final VersionedFlowSnapshot flowSnapshot;
+        private final RegisteredFlowSnapshot flowSnapshot;
 
         public InitiateUpdateFlowRequestWrapper(final T requestEntity, final ComponentLifecycle componentLifecycle,
                                                 final String requestType, final URI requestUri, final String replicateUriPath,
                                                 final Set<AffectedComponentEntity> affectedComponents,
-                                                final boolean replicateRequest, final VersionedFlowSnapshot flowSnapshot) {
+                                                final boolean replicateRequest, final RegisteredFlowSnapshot flowSnapshot) {
             this.requestEntity = requestEntity;
             this.componentLifecycle = componentLifecycle;
             this.requestType = requestType;
@@ -729,7 +784,7 @@ public abstract class FlowUpdateResource<T extends ProcessGroupDescriptorEntity,
             return replicateRequest;
         }
 
-        public VersionedFlowSnapshot getFlowSnapshot() {
+        public RegisteredFlowSnapshot getFlowSnapshot() {
             return flowSnapshot;
         }
     }

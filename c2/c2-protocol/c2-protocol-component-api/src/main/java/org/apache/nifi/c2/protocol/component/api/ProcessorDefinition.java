@@ -22,20 +22,17 @@ import io.swagger.annotations.ApiModelProperty;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 @ApiModel
-public class ProcessorDefinition extends ExtensionComponent implements ConfigurableComponentDefinition {
+public class ProcessorDefinition extends ConfigurableExtensionDefinition {
     private static final long serialVersionUID = 1L;
 
-    private Map<String, PropertyDescriptor> propertyDescriptors;
-    private boolean supportsDynamicProperties;
     private InputRequirement.Requirement inputRequirement;
-
     private List<Relationship> supportedRelationships;
     private boolean supportsDynamicRelationships;
+    private DynamicRelationship dynamicRelationship;
 
     private boolean triggerSerially;
     private boolean triggerWhenEmpty;
@@ -54,27 +51,8 @@ public class ProcessorDefinition extends ExtensionComponent implements Configura
     private String defaultYieldDuration;
     private String defaultBulletinLevel;
 
-    @Override
-    @ApiModelProperty("Descriptions of configuration properties applicable to this processor.")
-    public Map<String, PropertyDescriptor> getPropertyDescriptors() {
-        return (propertyDescriptors != null ? Collections.unmodifiableMap(propertyDescriptors) : null);
-    }
-
-    @Override
-    public void setPropertyDescriptors(LinkedHashMap<String, PropertyDescriptor> propertyDescriptors) {
-        this.propertyDescriptors = propertyDescriptors;
-    }
-
-    @Override
-    @ApiModelProperty("Whether or not this processor makes use of dynamic (user-set) properties.")
-    public boolean getSupportsDynamicProperties() {
-        return supportsDynamicProperties;
-    }
-
-    @Override
-    public void setSupportsDynamicProperties(boolean supportsDynamicProperties) {
-        this.supportsDynamicProperties = supportsDynamicProperties;
-    }
+    private List<Attribute> readsAttributes;
+    private List<Attribute> writesAttributes;
 
     @ApiModelProperty("Any input requirements this processor has.")
     public InputRequirement.Requirement getInputRequirement() {
@@ -101,6 +79,15 @@ public class ProcessorDefinition extends ExtensionComponent implements Configura
 
     public void setSupportsDynamicRelationships(boolean supportsDynamicRelationships) {
         this.supportsDynamicRelationships = supportsDynamicRelationships;
+    }
+
+    @ApiModelProperty("If the processor supports dynamic relationships, this describes the dynamic relationship")
+    public DynamicRelationship getDynamicRelationship() {
+        return dynamicRelationship;
+    }
+
+    public void setDynamicRelationship(DynamicRelationship dynamicRelationship) {
+        this.dynamicRelationship = dynamicRelationship;
     }
 
     @ApiModelProperty("Whether or not this processor should be triggered serially (i.e. no concurrent execution).")
@@ -233,5 +220,23 @@ public class ProcessorDefinition extends ExtensionComponent implements Configura
 
     public void setDefaultBulletinLevel(String defaultBulletinLevel) {
         this.defaultBulletinLevel = defaultBulletinLevel;
+    }
+
+    @ApiModelProperty("The FlowFile attributes this processor reads")
+    public List<Attribute> getReadsAttributes() {
+        return readsAttributes;
+    }
+
+    public void setReadsAttributes(List<Attribute> readsAttributes) {
+        this.readsAttributes = readsAttributes;
+    }
+
+    @ApiModelProperty("The FlowFile attributes this processor writes/updates")
+    public List<Attribute> getWritesAttributes() {
+        return writesAttributes;
+    }
+
+    public void setWritesAttributes(List<Attribute> writesAttributes) {
+        this.writesAttributes = writesAttributes;
     }
 }

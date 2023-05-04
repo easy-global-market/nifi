@@ -35,7 +35,6 @@ import org.apache.nifi.toolkit.cli.impl.client.nifi.ProcessorClient;
 import org.apache.nifi.toolkit.cli.impl.client.nifi.RequestConfig;
 import org.apache.nifi.web.api.dto.ControllerServiceDTO;
 import org.apache.nifi.web.api.dto.NodeDTO;
-import org.apache.nifi.web.api.dto.NodeEventDTO;
 import org.apache.nifi.web.api.dto.PortDTO;
 import org.apache.nifi.web.api.dto.ProcessorDTO;
 import org.apache.nifi.web.api.dto.flow.FlowDTO;
@@ -53,7 +52,7 @@ import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupFlowEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
 import org.apache.nifi.web.api.entity.ReportingTaskEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,14 +64,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.zip.GZIPInputStream;
 
-import static junit.framework.TestCase.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FlowSynchronizationIT extends NiFiSystemIT {
     private static final Logger logger = LoggerFactory.getLogger(FlowSynchronizationIT.class);
@@ -84,7 +83,7 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
-    protected NiFiInstanceFactory getInstanceFactory() {
+    public NiFiInstanceFactory getInstanceFactory() {
         return new SpawnedClusterNiFiInstanceFactory(
             new InstanceConfiguration.Builder()
                 .bootstrapConfig("src/test/resources/conf/clustered/node1/bootstrap.conf")
@@ -157,7 +156,6 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
             final FlowFileEntity flowFile = getClientUtil().getQueueFlowFile(connection.getId(), i);
             assertEquals("updated", flowFile.getFlowFile().getAttributes().get("attr"));
         }
-
     }
 
     @Test
@@ -246,6 +244,7 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         getClientUtil().enableControllerService(countService);
         getClientUtil().enableControllerService(sleepService);
         getClientUtil().startReportingTask(reportingTask);
+        getClientUtil().waitForValidProcessor(count.getId()); // Now that service was enabled, wait for processor to become valid.
         getClientUtil().startProcessGroupComponents(group.getId());
         getClientUtil().startProcessor(terminate);
         getClientUtil().startProcessor(generate);
@@ -383,13 +382,9 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         final NiFiInstance node2 = getNiFiInstance().getNodeInstance(2);
         node2.stop();
 
-        // Remove node from the cluster. This way we know when it's attempted to connected
-        final NodeDTO node2Dto = getNodeEntity(2).getNode();
-        final String node2Id = node2Dto.getNodeId();
-        final Integer node2ApiPort = node2Dto.getApiPort();
-        getNifiClient().getControllerClient().deleteNode(node2Id);
-        waitFor(() -> isNodeRemoved(node2ApiPort));
-
+        // Remove node from the cluster. This way we know when it's attempted to connect
+        final Integer node2ApiPort = getNodeApiPort(2);
+        removeNode(2);
         removeExtensionsNar(node2);
 
         node2.start(false);
@@ -399,6 +394,26 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
 
         // Wait for node to show as disconnected because it doesn't have the necessary nar
         waitForNodeState(2, NodeConnectionState.DISCONNECTED);
+
+        // We need to either restart Node 2 or remove it from the cluster in order to ensure that we can properly shutdown.
+        // Reconnecting to the cluster would require restoring the NAR file and restarting, which will take longer than simply removing the
+        // node from the cluster. So we opt for shutting down the node and removing it from the cluster.
+        node2.stop();
+        removeNode(2);
+    }
+
+    private void removeNode(final int index) throws NiFiClientException, IOException, InterruptedException {
+        final NodeDTO nodeDto = getNodeEntity(index).getNode();
+        final String nodeId = nodeDto.getNodeId();
+        final Integer apiPort = nodeDto.getApiPort();
+        getNifiClient().getControllerClient().deleteNode(nodeId);
+        waitFor(() -> isNodeRemoved(apiPort));
+    }
+
+    private Integer getNodeApiPort(final int index) throws NiFiClientException, IOException {
+        final NodeDTO nodeDto = getNodeEntity(index).getNode();
+        final Integer apiPort = nodeDto.getApiPort();
+        return apiPort;
     }
 
     @Test
@@ -424,29 +439,33 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         assertTrue(getNifiClient().getProcessorClient().getProcessor(generate.getId()).getComponent().getExtensionMissing());
     }
 
+
     @Test
-    public void testCannotJoinIfMissingConnectionHasData() throws NiFiClientException, IOException, InterruptedException {
+    public void testCannotRemoveComponentsWhileNodeDisconnected() throws NiFiClientException, IOException, InterruptedException {
         final ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
         final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
         final ConnectionEntity connection = getClientUtil().createConnection(generate, terminate, "success");
 
-        getClientUtil().updateProcessorSchedulingPeriod(generate, "60 sec");
-
         // Shut down node 2
         disconnectNode(2);
+        waitForNodeState(2, NodeConnectionState.DISCONNECTED);
 
-        switchClientToNode(2);
-        getClientUtil().startProcessor(generate);
-        waitForQueueCount(connection.getId(), 1);
+        // Attempt to delete connection. It should throw an Exception.
+        assertThrows(Exception.class, () -> getNifiClient().getConnectionClient().deleteConnection(connection));
 
-        switchClientToNode(1);
-        getNifiClient().getConnectionClient().deleteConnection(connection);
+        // Attempt to delete processor. It should throw an Exception.
+        assertThrows(Exception.class, () -> getNifiClient().getProcessorClient().deleteProcessor(generate));
 
+        // Reconnect the node
         reconnectNode(2);
+        waitForAllNodesConnected();
 
-        // Wait for node to be disconnected due to connection containing data
-        waitFor(() -> isNodeDisconnectedDueToMissingConnection(5672, connection.getId()));
+        // Ensure that we can delete the connection and the processors
+        getNifiClient().getConnectionClient().deleteConnection(connection);
+        getNifiClient().getProcessorClient().deleteProcessor(generate);
+        getNifiClient().getProcessorClient().deleteProcessor(terminate);
     }
+
 
     @Test
     public void testComponentStatesRestoredOnReconnect() throws NiFiClientException, IOException, InterruptedException {
@@ -485,39 +504,21 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         });
     }
 
-    private boolean isNodeDisconnectedDueToMissingConnection(final int nodeApiPort, final String connectionId) throws NiFiClientException, IOException {
-        final NodeDTO node2Dto = getNifiClient().getControllerClient().getNodes().getCluster().getNodes().stream()
-            .filter(dto -> dto.getApiPort() == nodeApiPort)
-            .findFirst()
-            .orElse(null);
-
-        if (node2Dto == null) {
-            return false;
-        }
-
-        if (!NodeConnectionState.DISCONNECTED.name().equals(node2Dto.getStatus())) {
-            return false;
-        }
-
-        // We should have an event indicating the ID of the connection that could not be removed
-        final List<NodeEventDTO> nodeEvents = node2Dto.getEvents();
-        for (final NodeEventDTO event : nodeEvents) {
-            if (event.getMessage().contains(connectionId)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
 
     private void removeExtensionsNar(final NiFiInstance nifiInstance) {
-        final File node2Lib = new File(nifiInstance.getInstanceDirectory(), "lib");
-        final File[] testExtensionsNar = node2Lib.listFiles(file -> file.getName().startsWith("nifi-system-test-extensions-nar-"));
+        final File extensionsNar = getExtensionsNar(nifiInstance);
+        final File backupFile = new File(extensionsNar.getParentFile(), extensionsNar.getName() + ".backup");
+        assertTrue(extensionsNar.renameTo(backupFile));
+    }
+
+    private File getExtensionsNar(final NiFiInstance nifiInstance) {
+        final File libDir = new File(nifiInstance.getInstanceDirectory(), "lib");
+        final File[] testExtensionsNar = libDir.listFiles(file -> file.getName().startsWith("nifi-system-test-extensions-nar-"));
         assertEquals(1, testExtensionsNar.length);
 
-        final File extensionsNar = testExtensionsNar[0];
-        assertTrue(extensionsNar.delete());
+        return testExtensionsNar[0];
     }
+
 
     private boolean isNodeRemoved(final int apiPort) {
         try {
@@ -604,6 +605,7 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         getClientUtil().enableControllerService(countService);
         getClientUtil().enableControllerService(sleepService);
         getClientUtil().startReportingTask(reportingTask);
+        getClientUtil().waitForValidProcessor(count.getId()); // Now that service was enabled, wait for processor to become valid.
         getClientUtil().startProcessGroupComponents(group.getId());
         getClientUtil().startProcessor(terminate);
         getClientUtil().startProcessor(generate);
@@ -734,7 +736,7 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
         getClientUtil().enableControllerService(countB);
         getClientUtil().enableControllerService(countA);
 
-        getNifiClient().getProcessorClient().startProcessor(countFlowFiles);
+        getClientUtil().startProcessor(countFlowFiles);
 
         // Disconnect Node 2. Switch client to direct requests to Node 2 so that we can update the node while it's disconnected.
         disconnectNode(2);
@@ -870,6 +872,40 @@ public class FlowSynchronizationIT extends NiFiSystemIT {
             }
 
             return flowDto.getConnections().isEmpty();
+        });
+    }
+
+    @Test
+    public void testRejoinAfterControllerServiceEnabled() throws NiFiClientException, IOException, InterruptedException {
+        final ControllerServiceEntity controllerService = getClientUtil().createControllerService("StandardCountService");
+        disconnectNode(2);
+
+        getClientUtil().enableControllerService(controllerService);
+        reconnectNode(2);
+        waitForAllNodesConnected();
+
+        switchClientToNode(2);
+        waitFor(() -> {
+            final ControllerServiceEntity currentService = getNifiClient().getControllerServicesClient(DO_NOT_REPLICATE).getControllerService(controllerService.getId());
+            return ControllerServiceState.ENABLED.name().equals(currentService.getComponent().getState());
+        });
+    }
+
+    @Test
+    public void testRejoinAfterControllerServiceDisabled() throws NiFiClientException, IOException, InterruptedException {
+        final ControllerServiceEntity controllerService = getClientUtil().createControllerService("StandardCountService");
+        getClientUtil().enableControllerService(controllerService);
+
+        disconnectNode(2);
+        getClientUtil().disableControllerService(controllerService);
+
+        reconnectNode(2);
+        waitForAllNodesConnected();
+
+        switchClientToNode(2);
+        waitFor(() -> {
+            final ControllerServiceEntity currentService = getNifiClient().getControllerServicesClient(DO_NOT_REPLICATE).getControllerService(controllerService.getId());
+            return ControllerServiceState.DISABLED.name().equals(currentService.getComponent().getState());
         });
     }
 

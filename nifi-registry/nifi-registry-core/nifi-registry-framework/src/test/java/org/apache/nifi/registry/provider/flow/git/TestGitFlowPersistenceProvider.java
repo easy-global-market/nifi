@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.registry.provider.flow.git;
 
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.nifi.registry.flow.FlowPersistenceException;
 import org.apache.nifi.registry.provider.ProviderConfigurationContext;
 import org.apache.nifi.registry.provider.ProviderCreationException;
@@ -26,7 +27,7 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,8 +40,9 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class TestGitFlowPersistenceProvider {
 
@@ -285,6 +287,33 @@ public class TestGitFlowPersistenceProvider {
             } catch (FlowPersistenceException e) {
                 assertEquals("Bucket ID bucket-id-A was not found.", e.getMessage());
             }
+        }, true);
+    }
+
+    @Test
+    public void testLoadLargeFlow() throws GitAPIException, IOException {
+        final Map<String, String> properties = new HashMap<>();
+        final byte[] largeByteContent = RandomUtils.nextBytes(60_000_000);
+        properties.put(GitFlowPersistenceProvider.FLOW_STORAGE_DIR_PROP, "target/repo-with-large-flow");
+
+        assertProvider(properties, g -> {}, p -> {
+            // Create some Flows and keep the directory.
+            final StandardFlowSnapshotContext.Builder contextBuilder = new StandardFlowSnapshotContext.Builder()
+                    .bucketId("bucket-id-A")
+                    .bucketName("C'est/Bucket A/です。")
+                    .flowId("flow-id-1")
+                    .flowName("テスト_用/フロー#1\\[contains invalid chars]")
+                    .author("unit-test-user")
+                    .comments("Initial commit.")
+                    .snapshotTimestamp(new Date().getTime())
+                    .version(1);
+            p.saveFlowContent(contextBuilder.build(), largeByteContent);
+        }, false);
+
+        assertProvider(properties, g -> {}, p -> {
+            // Should be able to load flow from commit histories.
+            final byte[] fromRepo = p.getFlowContent("bucket-id-A", "flow-id-1", 1);
+            assertArrayEquals(largeByteContent, fromRepo);
         }, true);
     }
 }

@@ -24,6 +24,18 @@ import org.apache.nifi.authorization.user.NiFiUserUtils;
 import org.apache.nifi.cluster.coordination.ClusterCoordinator;
 import org.apache.nifi.cluster.coordination.http.HttpResponseMapper;
 import org.apache.nifi.cluster.coordination.http.StandardHttpResponseMapper;
+import org.apache.nifi.cluster.coordination.http.endpoints.ConnectionEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ControllerServiceEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.FlowRegistryClientEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.FunnelEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.LabelEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ParameterContextEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ParameterProviderEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.PortEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ProcessGroupEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ProcessorEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.RemoteProcessGroupEndpointMerger;
+import org.apache.nifi.cluster.coordination.http.endpoints.ReportingTaskEndpointMerger;
 import org.apache.nifi.cluster.coordination.node.NodeConnectionState;
 import org.apache.nifi.cluster.coordination.node.NodeConnectionStatus;
 import org.apache.nifi.cluster.manager.NodeResponse;
@@ -49,6 +61,7 @@ import javax.ws.rs.core.Response.Status;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,12 +84,14 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class ThreadPoolRequestReplicator implements RequestReplicator {
 
     private static final Logger logger = LoggerFactory.getLogger(ThreadPoolRequestReplicator.class);
+    private static final Pattern SNIPPET_URI_PATTERN = Pattern.compile("/nifi-api/snippets/[a-f0-9\\-]{36}");
 
     private final int maxConcurrentRequests; // maximum number of concurrent requests
     private final HttpResponseMapper responseMapper;
@@ -164,9 +179,10 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
     @Override
     public AsyncClusterResponse replicate(NiFiUser user, String method, URI uri, Object entity, Map<String, String> headers) {
         final Map<NodeConnectionState, List<NodeIdentifier>> stateMap = clusterCoordinator.getConnectionStates();
-        final boolean mutable = isMutableRequest(method, uri.getPath());
+        final boolean mutable = isMutableRequest(method);
 
-        // If the request is mutable, ensure that all nodes are connected.
+        // If the request is mutable, ensure the appropriate state: there can be no Connecting Nodes (in order to avoid confusion where a node gets the dataflow, and then gets modified before the
+        // node fully loads the dataflow), and we cannot delete a connection while a node is OFFLOADING (otherwise, we could delete a connection while a node is trying to push data to it).
         if (mutable) {
             final List<NodeIdentifier> connecting = stateMap.get(NodeConnectionState.CONNECTING);
             if (connecting != null && !connecting.isEmpty()) {
@@ -174,6 +190,14 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
                     throw new ConnectingNodeMutableRequestException("Node " + connecting.iterator().next() + " is currently connecting");
                 } else {
                     throw new ConnectingNodeMutableRequestException(connecting.size() + " Nodes are currently connecting");
+                }
+            }
+
+            // Do not allow any components to be deleted unless all nodes are connected.
+            if (isDeleteComponent(method, uri.getPath())) {
+                final List<NodeIdentifier> nonConnectedNodes = getNonConnectedNodes(stateMap);
+                if (!nonConnectedNodes.isEmpty()) {
+                    throw new IllegalClusterStateException("Cannot delete component because the following Nodes are not connected: " + nonConnectedNodes);
                 }
             }
         }
@@ -186,6 +210,25 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
         final Set<NodeIdentifier> nodeIdSet = new HashSet<>(nodeIds);
 
         return replicate(nodeIdSet, user, method, uri, entity, headers, true, true);
+    }
+
+    private List<NodeIdentifier> getNonConnectedNodes(final Map<NodeConnectionState, List<NodeIdentifier>> stateMap) {
+        // We want to include all nodes except for those that are CONNECTED or REMOVED.
+        // We do that by first adding all nodes to the List and then removing those that are CONNECTED or REMOVED.
+        final List<NodeIdentifier> nonConnectedNodes = new ArrayList<>();
+        stateMap.values().forEach(nonConnectedNodes::addAll);
+
+        final List<NodeIdentifier> connectedNodes = stateMap.get(NodeConnectionState.CONNECTED);
+        if (connectedNodes != null) {
+            nonConnectedNodes.removeAll(connectedNodes);
+        }
+
+        final List<NodeIdentifier> removedNodes = stateMap.get(NodeConnectionState.REMOVED);
+        if (removedNodes != null) {
+            nonConnectedNodes.removeAll(removedNodes);
+        }
+
+        return nonConnectedNodes;
     }
 
     void updateRequestHeaders(final Map<String, String> headers, final NiFiUser user) {
@@ -243,7 +286,7 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
             // performing an action, rather than simply proxying the request to the cluster coordinator. In this case,
             // we need to ensure that we use proper locking. We don't want two requests modifying the flow at the same
             // time, so we use a write lock if the request is mutable and a read lock otherwise.
-            final Lock lock = isMutableRequest(method, uri.getPath()) ? writeLock : readLock;
+            final Lock lock = isMutableRequest(method) ? writeLock : readLock;
             logger.debug("Obtaining lock {} in order to replicate request {} {}", lock, method, uri);
             lock.lock();
             try {
@@ -394,7 +437,7 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
             // issue the request. This is all handled by calling performVerification, which will replicate
             // the 'vote' request to all nodes and then if successful will call back into this method to
             // replicate the actual request.
-            final boolean mutableRequest = isMutableRequest(method, uri.getPath());
+            final boolean mutableRequest = isMutableRequest(method);
             if (mutableRequest && performVerification) {
                 logger.debug("Performing verification (first phase of two-phase commit) for Request ID {}", requestId);
                 performVerification(nodeIds, method, uri, entity, updatedHeaders, response, merge, monitor);
@@ -617,7 +660,7 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
         return nodeResponse;
     }
 
-    private boolean isMutableRequest(final String method, final String uriPath) {
+    private boolean isMutableRequest(final String method) {
         switch (method.toUpperCase()) {
             case HttpMethod.GET:
             case HttpMethod.HEAD:
@@ -628,12 +671,40 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
         }
     }
 
+    private boolean isDeleteComponent(final String method, final String uriPath) {
+        if (!HttpMethod.DELETE.equalsIgnoreCase(method)) {
+            return false;
+        }
+
+        // Check if the URI indicates that a component should be deleted.
+        // We cannot simply make our decision based on the fact that the request is a DELETE request.
+        // This is because we do need to allow deletion of asynchronous requests, such as updating parameters, querying provenance, etc.
+        // which create a request, poll until the request completes, and then deletes it. Additionally, we want to allow terminating
+        // Processors, which is done by issuing a request to DELETE /processors/<id>/threads
+        final boolean componentUri = ConnectionEndpointMerger.CONNECTION_URI_PATTERN.matcher(uriPath).matches()
+            || ProcessorEndpointMerger.PROCESSOR_URI_PATTERN.matcher(uriPath).matches()
+            || FunnelEndpointMerger.FUNNEL_URI_PATTERN.matcher(uriPath).matches()
+            || PortEndpointMerger.INPUT_PORT_URI_PATTERN.matcher(uriPath).matches()
+            || PortEndpointMerger.OUTPUT_PORT_URI_PATTERN.matcher(uriPath).matches()
+            || RemoteProcessGroupEndpointMerger.REMOTE_PROCESS_GROUP_URI_PATTERN.matcher(uriPath).matches()
+            || ProcessGroupEndpointMerger.PROCESS_GROUP_URI_PATTERN.matcher(uriPath).matches()
+            || ControllerServiceEndpointMerger.CONTROLLER_CONTROLLER_SERVICES_URI.equals(uriPath)
+            || ControllerServiceEndpointMerger.CONTROLLER_SERVICE_URI_PATTERN.matcher(uriPath).matches()
+            || ReportingTaskEndpointMerger.REPORTING_TASK_URI_PATTERN.matcher(uriPath).matches()
+            || ParameterContextEndpointMerger.PARAMETER_CONTEXT_URI_PATTERN.matcher(uriPath).matches()
+            || LabelEndpointMerger.LABEL_URI_PATTERN.matcher(uriPath).matches()
+            || ParameterProviderEndpointMerger.PARAMETER_PROVIDER_URI_PATTERN.matcher(uriPath).matches()
+            || FlowRegistryClientEndpointMerger.CONTROLLER_REGISTRY_URI_PATTERN.matcher(uriPath).matches()
+            || SNIPPET_URI_PATTERN.matcher(uriPath).matches();
+
+        return componentUri;
+    }
+
     /**
      * Verifies that the cluster is in a state that will allow requests to be made using the given HTTP Method and URI path
      *
      * @param httpMethod the HTTP Method
      * @param uriPath    the URI Path
-     * @throw IllegalClusterStateException if the cluster is not in a state that allows a request to made to the given URI Path using the given HTTP Method
      */
     private void verifyClusterState(final String httpMethod, final String uriPath) {
         final boolean mutableRequest = HttpMethod.DELETE.equals(httpMethod) || HttpMethod.POST.equals(httpMethod) || HttpMethod.PUT.equals(httpMethod);
@@ -645,6 +716,13 @@ public class ThreadPoolRequestReplicator implements RequestReplicator {
             if (connectionStates.containsKey(NodeConnectionState.CONNECTING)) {
                 // if any node is connecting and a request can change the flow, then we throw an exception
                 throw new ConnectingNodeMutableRequestException("Received a mutable request [" + httpMethod + " " + uriPath + "] while a node is trying to connect to the cluster");
+            }
+        }
+
+        if (isDeleteComponent(httpMethod, uriPath)) {
+            final List<NodeIdentifier> nonConnectedNodes = getNonConnectedNodes(clusterCoordinator.getConnectionStates());
+            if (!nonConnectedNodes.isEmpty()) {
+                throw new IllegalClusterStateException("Cannot delete component because the following Nodes are not connected: " + nonConnectedNodes);
             }
         }
     }

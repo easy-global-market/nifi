@@ -84,6 +84,7 @@ The following are available commands:
  nifi pg-import
  nifi pg-start
  nifi pg-stop
+ nifi pg-create
  nifi pg-get-vars
  nifi pg-set-var
  nifi pg-get-version
@@ -92,39 +93,55 @@ The following are available commands:
  nifi pg-list
  nifi pg-status
  nifi pg-get-services
+ nifi pg-create-service
  nifi pg-enable-services
  nifi pg-disable-services
- nifi pg-create-service
- nifi create-user
+ nifi pg-get-param-context
+ nifi pg-set-param-context
+ nifi pg-replace
+ nifi get-services
+ nifi get-service
+ nifi create-service
+ nifi enable-services
+ nifi disable-services
+ nifi get-reporting-tasks
+ nifi get-reporting-task
+ nifi create-reporting-task
+ nifi delete-reporting-task
+ nifi start-reporting-tasks
+ nifi stop-reporting-tasks
  nifi list-users
- nifi create-user-group
+ nifi create-user
  nifi list-user-groups
+ nifi create-user-group
  nifi update-user-group
  nifi get-policy
  nifi update-policy
- nifi create-service
- nifi get-services
- nifi get-service
- nifi disable-services
- nifi enable-services
- nifi get-reporting-task
- nifi get-reporting-tasks
- nifi create-reporting-task
- nifi set-param
- nifi delete-param
+ nifi list-templates
+ nifi download-template
+ nifi upload-template
  nifi list-param-contexts
  nifi get-param-context
  nifi create-param-context
  nifi delete-param-context
- nifi merge-param-context
+ nifi set-inherited-param-contexts
+ nifi remove-inherited-param-contexts
+ nifi set-param-provider-reference
+ nifi remove-param-provider-reference
+ nifi set-param
+ nifi delete-param
+ nifi export-param-context
  nifi import-param-context
- nifi pg-get-param-context
- nifi pg-set-param-context
- nifi list-templates
- nifi download-template
- nifi upload-template
- nifi start-reporting-tasks
- nifi stop-reporting-tasks
+ nifi merge-param-context
+ nifi list-param-providers
+ nifi get-param-provider
+ nifi create-param-provider
+ nifi delete-param-provider
+ nifi fetch-params
+ nifi set-param-provider-property
+ nifi get-access-token
+ nifi get-access-token-spnego
+ nifi logout-access-token
  registry current-user
  registry list-buckets
  registry create-bucket
@@ -156,6 +173,9 @@ The following are available commands:
  registry get-policy
  registry update-policy
  registry update-bucket-policy
+ registry get-access-token
+ registry get-access-token-spnego
+ registry logout-access-token
  session keys
  session show
  session get
@@ -293,7 +313,7 @@ Typing "nifi " and then a tab will show the sub-commands for NiFi:
  delete-param            get-service             pg-get-param-context    update-reg-client
  delete-param-context    get-services            pg-get-services         update-user-group
  disable-services        import-param-context    pg-get-vars             upload-template
- disconnect-node         list-param-contexts     pg-get-version
+ disconnect-node         list-param-contexts     pg-get-version          delete-reporting-task
  download-template       list-reg-clients        pg-import
 
 Arguments that represent a path to a file, such as `-p` or when setting a properties file in the session, will auto-complete the path being typed:
@@ -1564,3 +1584,70 @@ NOTE: As of NiFi 1.10.x, because of an upgrade to ZooKeeper 3.5.x, the migrator 
 ** `zk-migrator.sh -s -z destinationHostname:destinationClientPort/destinationRootPath/components -k /path/to/jaasconfig/jaas-config.conf -f /path/to/export/zk-source-data.json`
 
 6. Once the migration has completed successfully, start the processors in the NiFi flow.  Processing should continue from the point at which it was stopped when the NiFi flow was stopped.
+
+[[kafka_migrator]]
+== Kafka Processor Migrator
+With NiFi version 1.15.3, Kafka processor versions 0.8, 0.9, 0.10 and 0.11 were removed.
+In large flows having many numbers of components it is challenging to replace these processors manually.
+This tool can be used to update a flow in an automated way.
+
+=== Usage
+Running the script requires 3 mandatory and 1 optional parameters:
+
+* Input file, the full path of the flow.xml.gz in which the replacement is required.
+* Output file, the full path of the file where the results should be saved.
+* Transaction, whether the new processors should be configured with or without transaction usage.
+* Optional: Kafka Brokers, a comma separated list of Kafka Brokers in <host>:<port> format.
+
+Different input and output files must be used.
+Kafka Broker argument can be omitted if flow does not contain GetKafka or PutKafka processors.
+
+1. Run script, a possible example:
+
+ ./bin/kafka-migrator.sh -i "/tmp/flow/flow.xml.gz" -o "/tmp/flow/flow_result.xml.gz" -t false -k "mykafkaserver1:1234,mykafkaserver2:1235"
+
+2. Rename flow_result.xml.gz file to flow.xml.gz, do not overwrite your input file.
+3. Copy flow.xml.gz file to all the NiFi nodes conf directory
+4. Start NiFi
+5. Verify the results.
+
+=== Expected Behaviour
+* Flow replacement:
+* For all replaced processors:
+** changing class and artifact
+** configure transaction as true
+*** 'Delivery Guarantee' property will be set to 'Replicated'
+*** if 'Honor-Transactions' and 'Use-Transactions' properties are present in the file they will be set to true
+*** if 'Honor-Transactions' and 'Use-Transactions' not present they will be translated as true in NiFi
+** configure transaction as false
+*** 'Delivery Guarantee' property will keep its original setting.
+*** 'Honor-Transactions' and 'Use-Transactions' will be set to false
+* For version 0.8 processors (when kafka broker list argument provided)
+** remove all version 0.8 properties
+** add version 2.0 properties with default value except for 'Topic Name', 'Group ID',
+'Partition', 'Kafka Key', 'Delivery Guarantee' (if transaction false) and
+'Compression Codec' values which will be copied over
+
+* Template replacement:
+* For all replaced processors:
+** changing type and artifact
+** configure transaction as true
+*** 'Delivery Guarantee' property will be set to 'Replicated'
+*** if 'Honor-Transactions' and 'Use-Transactions' properties are present in the file they will be set to true
+*** if 'Honor-Transactions' and 'Use-Transactions' not present they will be translated as true in NiFi
+** configure transaction as false
+*** 'Delivery Guarantee' property will keep its original setting.
+*** 'Honor-Transactions' and 'Use-Transactions' will be set to false
+* For version 0.8 processors (when kafka broker list argument provided)
+** remove all version 0.8 properties and descriptors
+** add version 2.0 properties with default value except for 'Topic Name', 'Group ID',
+'Partition', 'Kafka Key', 'Delivery Guarantee' (if transaction false) and
+'Compression Codec' values which will be copied over
+*** add version 2.0 descriptors
+
+=== Limitations
+* All deprecated Kafka processors will be replaced with version 2.0 processors.
+* Script will not rename the processors, only their type will be changed.
+* Transaction setting will be applied to all the replaced processors.
+* The flow.xml.gz file needs to be fit in memory and process time depends on the file size.
+* Processors in templates will be replaced as well, please download the original templates if desired.

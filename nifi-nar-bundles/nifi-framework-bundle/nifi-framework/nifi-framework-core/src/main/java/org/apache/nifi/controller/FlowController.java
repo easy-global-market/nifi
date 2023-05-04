@@ -19,7 +19,6 @@ package org.apache.nifi.controller;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.admin.service.AuditService;
 import org.apache.nifi.annotation.lifecycle.OnConfigurationRestored;
-import org.apache.nifi.annotation.notification.OnPrimaryNodeStateChange;
 import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.authorization.Authorizer;
 import org.apache.nifi.authorization.Resource;
@@ -154,6 +153,7 @@ import org.apache.nifi.nar.NarCloseable;
 import org.apache.nifi.nar.NarThreadContextClassLoader;
 import org.apache.nifi.parameter.ParameterContextManager;
 import org.apache.nifi.parameter.ParameterLookup;
+import org.apache.nifi.parameter.ParameterProvider;
 import org.apache.nifi.parameter.StandardParameterContextManager;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
@@ -167,7 +167,7 @@ import org.apache.nifi.provenance.ProvenanceRepository;
 import org.apache.nifi.provenance.StandardProvenanceAuthorizableFactory;
 import org.apache.nifi.provenance.StandardProvenanceEventRecord;
 import org.apache.nifi.registry.VariableRegistry;
-import org.apache.nifi.registry.flow.FlowRegistryClient;
+import org.apache.nifi.registry.flow.mapping.VersionedComponentStateLookup;
 import org.apache.nifi.registry.variable.MutableVariableRegistry;
 import org.apache.nifi.remote.HttpRemoteSiteListener;
 import org.apache.nifi.remote.RemoteGroupPort;
@@ -310,7 +310,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     private final Set<RemoteGroupPort> startRemoteGroupPortsAfterInitialization;
     private final LeaderElectionManager leaderElectionManager;
     private final ClusterCoordinator clusterCoordinator;
-    private final FlowRegistryClient flowRegistryClient;
     private final FlowEngine validationThreadPool;
     private final ValidationTrigger validationTrigger;
     private final ReloadComponent reloadComponent;
@@ -372,7 +371,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     private boolean clustered;
 
     // guarded by rwLock
-    private NodeConnectionStatus connectionStatus;
+    private volatile NodeConnectionStatus connectionStatus;
 
     private StatusAnalyticsEngine analyticsEngine;
 
@@ -395,7 +394,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             final PropertyEncryptor encryptor,
             final BulletinRepository bulletinRepo,
             final VariableRegistry variableRegistry,
-            final FlowRegistryClient flowRegistryClient,
             final ExtensionManager extensionManager,
             final StatusHistoryRepository statusHistoryRepository) {
 
@@ -412,7 +410,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                 /* heartbeat monitor */ null,
                 /* leader election manager */ null,
                 /* variable registry */ variableRegistry,
-                flowRegistryClient,
                 extensionManager,
                 null,
                 statusHistoryRepository);
@@ -430,7 +427,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             final HeartbeatMonitor heartbeatMonitor,
             final LeaderElectionManager leaderElectionManager,
             final VariableRegistry variableRegistry,
-            final FlowRegistryClient flowRegistryClient,
             final ExtensionManager extensionManager,
             final RevisionManager revisionManager,
             final StatusHistoryRepository statusHistoryRepository) {
@@ -448,7 +444,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                 heartbeatMonitor,
                 leaderElectionManager,
                 variableRegistry,
-                flowRegistryClient,
                 extensionManager,
                 revisionManager,
                 statusHistoryRepository);
@@ -470,7 +465,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             final HeartbeatMonitor heartbeatMonitor,
             final LeaderElectionManager leaderElectionManager,
             final VariableRegistry variableRegistry,
-            final FlowRegistryClient flowRegistryClient,
             final ExtensionManager extensionManager,
             final RevisionManager revisionManager,
             final StatusHistoryRepository statusHistoryRepository) {
@@ -487,7 +481,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         this.authorizer = authorizer;
         this.auditService = auditService;
         this.configuredForClustering = configuredForClustering;
-        this.flowRegistryClient = flowRegistryClient;
         this.revisionManager = revisionManager;
         this.statusHistoryRepository = statusHistoryRepository;
 
@@ -543,7 +536,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             throw new RuntimeException(e);
         }
 
-        processScheduler = new StandardProcessScheduler(timerDrivenEngineRef.get(), this, encryptor, stateManagerProvider, this.nifiProperties);
+        processScheduler = new StandardProcessScheduler(timerDrivenEngineRef.get(), this, stateManagerProvider, this.nifiProperties);
         eventDrivenWorkerQueue = new EventDrivenWorkerQueue(false, false, processScheduler);
 
         parameterContextManager = new StandardParameterContextManager();
@@ -558,8 +551,8 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                 repositoryContextFactory, maxEventDrivenThreads.get(), encryptor, extensionManager, this);
         processScheduler.setSchedulingAgent(SchedulingStrategy.EVENT_DRIVEN, eventDrivenSchedulingAgent);
 
-        final QuartzSchedulingAgent quartzSchedulingAgent = new QuartzSchedulingAgent(this, timerDrivenEngineRef.get(), repositoryContextFactory, encryptor);
-        final TimerDrivenSchedulingAgent timerDrivenAgent = new TimerDrivenSchedulingAgent(this, timerDrivenEngineRef.get(), repositoryContextFactory, encryptor, this.nifiProperties);
+        final QuartzSchedulingAgent quartzSchedulingAgent = new QuartzSchedulingAgent(this, timerDrivenEngineRef.get(), repositoryContextFactory);
+        final TimerDrivenSchedulingAgent timerDrivenAgent = new TimerDrivenSchedulingAgent(this, timerDrivenEngineRef.get(), repositoryContextFactory, this.nifiProperties);
         processScheduler.setSchedulingAgent(SchedulingStrategy.TIMER_DRIVEN, timerDrivenAgent);
         // PRIMARY_NODE_ONLY is deprecated, but still exists to handle processors that are still defined with it (they haven't been re-configured with executeNode = PRIMARY).
         processScheduler.setSchedulingAgent(SchedulingStrategy.PRIMARY_NODE_ONLY, timerDrivenAgent);
@@ -594,7 +587,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         this.reloadComponent = new StandardReloadComponent(this);
 
         final ProcessGroup rootGroup = new StandardProcessGroup(ComponentIdGenerator.generateId().toString(), controllerServiceProvider, processScheduler,
-                encryptor, extensionManager, stateManagerProvider, flowManager, flowRegistryClient, reloadComponent, new MutableVariableRegistry(this.variableRegistry), this,
+                encryptor, extensionManager, stateManagerProvider, flowManager, reloadComponent, new MutableVariableRegistry(this.variableRegistry), this,
                 nifiProperties);
         rootGroup.setName(FlowManager.DEFAULT_ROOT_GROUP_NAME);
         setRootGroup(rootGroup);
@@ -971,7 +964,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
 
                     for (final ProcessGroup group : allGroups) {
                         try {
-                            group.synchronizeWithFlowRegistry(flowRegistryClient);
+                            group.synchronizeWithFlowRegistry(flowManager);
                         } catch (final Exception e) {
                             LOG.error("Failed to synchronize {} with Flow Registry", group, e);
                         }
@@ -1009,6 +1002,14 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
 
             try (final NarCloseable nc = NarCloseable.withComponentNarLoader(extensionManager, task.getClass(), task.getIdentifier())) {
                 ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnConfigurationRestored.class, task, taskNode.getConfigurationContext());
+            }
+        }
+
+        for (final ParameterProviderNode parameterProviderNode : flowManager.getAllParameterProviders()) {
+            final ParameterProvider provider = parameterProviderNode.getParameterProvider();
+
+            try (final NarCloseable nc = NarCloseable.withComponentNarLoader(extensionManager, provider.getClass(), provider.getIdentifier())) {
+                ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnConfigurationRestored.class, provider);
             }
         }
     }
@@ -1416,28 +1417,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
 
         readLock.lock();
         try {
-            final ScheduledStateLookup scheduledStateLookup = new ScheduledStateLookup() {
-                @Override
-                public ScheduledState getScheduledState(final ProcessorNode procNode) {
-                    if (startConnectablesAfterInitialization.contains(procNode)) {
-                        return ScheduledState.RUNNING;
-                    }
-
-                    return procNode.getDesiredState();
-                }
-
-                @Override
-                public ScheduledState getScheduledState(final Port port) {
-                    if (startConnectablesAfterInitialization.contains(port)) {
-                        return ScheduledState.RUNNING;
-                    }
-                    if (startRemoteGroupPortsAfterInitialization.contains(port)) {
-                        return ScheduledState.RUNNING;
-                    }
-
-                    return port.getScheduledState();
-                }
-            };
+            final ScheduledStateLookup scheduledStateLookup = createScheduledStateLookup();
 
             flowConfiguration = serializer.transform(this, scheduledStateLookup);
         } finally {
@@ -1447,11 +1427,76 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         serializer.serialize(flowConfiguration, os);
     }
 
+    public ScheduledStateLookup createScheduledStateLookup() {
+        return new ScheduledStateLookup() {
+            @Override
+            public ScheduledState getScheduledState(final ProcessorNode procNode) {
+                if (startConnectablesAfterInitialization.contains(procNode)) {
+                    return ScheduledState.RUNNING;
+                }
+
+                return procNode.getDesiredState();
+            }
+
+            @Override
+            public ScheduledState getScheduledState(final Port port) {
+                if (startConnectablesAfterInitialization.contains(port)) {
+                    return ScheduledState.RUNNING;
+                }
+                if (startRemoteGroupPortsAfterInitialization.contains(port)) {
+                    return ScheduledState.RUNNING;
+                }
+
+                return port.getScheduledState();
+            }
+        };
+    }
+
+    /**
+     * Creates a VersionedComponentStateLookup that checks whether or not the given component is scheduled to start when the FlowController
+     * is initialized. If the FlowController has already been initialized or if the given component is not scheduled to start upon FlowController
+     * initialization, delegates the call to the provided lookup
+     *
+     * @param delegate the lookup to delegate calls to if a component is not scheduled to start upon FlowController initialization
+     * @return the VersionedComponentStateLookup that is created
+     */
+    public VersionedComponentStateLookup createVersionedComponentStateLookup(final VersionedComponentStateLookup delegate) {
+        return new VersionedComponentStateLookup() {
+            @Override
+            public org.apache.nifi.flow.ScheduledState getState(final ProcessorNode processorNode) {
+                if (isStartAfterInitialization(processorNode)) {
+                    return org.apache.nifi.flow.ScheduledState.RUNNING;
+                }
+
+                return delegate.getState(processorNode);
+            }
+
+            @Override
+            public org.apache.nifi.flow.ScheduledState getState(final Port port) {
+                if (isStartAfterInitialization(port)) {
+                    return org.apache.nifi.flow.ScheduledState.RUNNING;
+                }
+
+                return delegate.getState(port);
+            }
+
+            @Override
+            public org.apache.nifi.flow.ScheduledState getState(final ReportingTaskNode taskNode) {
+                return delegate.getState(taskNode);
+            }
+
+            @Override
+            public org.apache.nifi.flow.ScheduledState getState(final ControllerServiceNode serviceNode) {
+                return delegate.getState(serviceNode);
+            }
+        };
+    }
+
     /**
      * Synchronizes this controller with the proposed flow.
      * <p>
      * For more details, see
-     * {@link FlowSynchronizer#sync(FlowController, DataFlow, PropertyEncryptor, FlowService)}.
+     * {@link FlowSynchronizer#sync(FlowController, DataFlow, FlowService, BundleUpdateStrategy)}.
      *
      * @param synchronizer synchronizer
      * @param dataFlow the flow to load the controller with. If the flow is null
@@ -1476,7 +1521,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             LOG.debug("Synchronizing controller with proposed flow");
 
             try {
-                synchronizer.sync(this, dataFlow, encryptor, flowService, bundleUpdateStrategy);
+                synchronizer.sync(this, dataFlow, flowService, bundleUpdateStrategy);
             } catch (final UninheritableFlowException ufe) {
                 final NodeIdentifier localNodeId = getNodeId();
                 if (localNodeId != null) {
@@ -1521,7 +1566,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     public void setMaxTimerDrivenThreadCount(final int maxThreadCount) {
         writeLock.lock();
         try {
-            setMaxThreadCount(maxThreadCount, this.timerDrivenEngineRef.get(), this.maxTimerDrivenThreads);
+            setMaxThreadCount(maxThreadCount, "Timer Driven", this.timerDrivenEngineRef.get(), this.maxTimerDrivenThreads);
         } finally {
             writeLock.unlock("setMaxTimerDrivenThreadCount");
         }
@@ -1530,7 +1575,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     public void setMaxEventDrivenThreadCount(final int maxThreadCount) {
         writeLock.lock();
         try {
-            setMaxThreadCount(maxThreadCount, this.eventDrivenEngineRef.get(), this.maxEventDrivenThreads);
+            setMaxThreadCount(maxThreadCount, "Event Driven", this.eventDrivenEngineRef.get(), this.maxEventDrivenThreads);
             processScheduler.setMaxThreadCount(SchedulingStrategy.EVENT_DRIVEN, maxThreadCount);
         } finally {
             writeLock.unlock("setMaxEventDrivenThreadCount");
@@ -1541,16 +1586,23 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
      * Updates the number of threads that can be simultaneously used for executing processors.
      * This method must be called while holding the write lock!
      *
-     * @param maxThreadCount max number of threads
+     * @param maxThreadCount Requested new thread pool size
+     * @param poolName Thread Pool Name
+     * @param engine Flow Engine executor or null when terminated
+     * @param maxThreads Internal tracker for Maximum Threads
      */
-    private void setMaxThreadCount(final int maxThreadCount, final FlowEngine engine, final AtomicInteger maxThreads) {
+    private void setMaxThreadCount(final int maxThreadCount, final String poolName, final FlowEngine engine, final AtomicInteger maxThreads) {
         if (maxThreadCount < 1) {
-            throw new IllegalArgumentException("Cannot set max number of threads to less than 2");
+            throw new IllegalArgumentException("Cannot set max number of threads to less than 1");
         }
 
         maxThreads.getAndSet(maxThreadCount);
-        if (null != engine && engine.getCorePoolSize() < maxThreadCount) {
-            engine.setCorePoolSize(maxThreads.intValue());
+        if (engine == null) {
+            LOG.debug("[{}] Engine not found: Maximum Thread Count not updated", poolName);
+        } else {
+            final int previousCorePoolSize = engine.getCorePoolSize();
+            engine.setCorePoolSize(maxThreadCount);
+            LOG.info("[{}] Maximum Thread Count updated [{}] previous [{}]", poolName, maxThreadCount, previousCorePoolSize);
         }
     }
 
@@ -1817,6 +1869,9 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                     case REMOTE_OUTPUT_PORT:
                         group.startOutputPort((Port) connectable);
                         break;
+                    case PROCESSOR:
+                        group.startProcessor((ProcessorNode) connectable,  true);
+                        break;
                     default:
                         throw new IllegalArgumentException();
                 }
@@ -1846,6 +1901,10 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                 case REMOTE_OUTPUT_PORT:
                     startConnectablesAfterInitialization.remove(connectable);
                     group.stopOutputPort((Port) connectable);
+                    break;
+                case PROCESSOR:
+                    startConnectablesAfterInitialization.remove(connectable);
+                    group.stopProcessor((ProcessorNode) connectable);
                     break;
                 default:
                     throw new IllegalArgumentException();
@@ -2032,11 +2091,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         flowManager.removeReportingTask(reportingTaskNode);
     }
 
-
-    public FlowRegistryClient getFlowRegistryClient() {
-        return flowRegistryClient;
-    }
-
     public ControllerServiceProvider getControllerServiceProvider() {
         return controllerServiceProvider;
     }
@@ -2082,27 +2136,6 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         final CounterRepository counterRepo = counterRepositoryRef.get();
         final Counter resetValue = counterRepo.resetCounter(identifier);
         return resetValue;
-    }
-
-    //
-    // Access to controller status
-    //
-    public QueueSize getTotalFlowFileCount(final ProcessGroup group) {
-        int count = 0;
-        long contentSize = 0L;
-
-        for (final Connection connection : group.getConnections()) {
-            final QueueSize size = connection.getFlowFileQueue().size();
-            count += size.getObjectCount();
-            contentSize += size.getByteCount();
-        }
-        for (final ProcessGroup childGroup : group.getProcessGroups()) {
-            final QueueSize size = getTotalFlowFileCount(childGroup);
-            count += size.getObjectCount();
-            contentSize += size.getByteCount();
-        }
-
-        return new QueueSize(count, contentSize);
     }
 
     public class GroupStatusCounts {
@@ -2486,21 +2519,15 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     public void setPrimary(final boolean primary) {
         final PrimaryNodeState nodeState = primary ? PrimaryNodeState.ELECTED_PRIMARY_NODE : PrimaryNodeState.PRIMARY_NODE_REVOKED;
         final ProcessGroup rootGroup = flowManager.getRootGroup();
+
         for (final ProcessorNode procNode : rootGroup.findAllProcessors()) {
-            try (final NarCloseable narCloseable = NarCloseable.withComponentNarLoader(extensionManager, procNode.getProcessor().getClass(), procNode.getIdentifier())) {
-                ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnPrimaryNodeStateChange.class, procNode.getProcessor(), nodeState);
-            }
+            processScheduler.submitFrameworkTask(() -> processScheduler.notifyPrimaryNodeStateChange(procNode, nodeState) );
         }
         for (final ControllerServiceNode serviceNode : flowManager.getAllControllerServices()) {
-            final Class<?> serviceImplClass = serviceNode.getControllerServiceImplementation().getClass();
-            try (final NarCloseable narCloseable = NarCloseable.withComponentNarLoader(extensionManager, serviceImplClass, serviceNode.getIdentifier())) {
-                ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnPrimaryNodeStateChange.class, serviceNode.getControllerServiceImplementation(), nodeState);
-            }
+            processScheduler.submitFrameworkTask(() -> processScheduler.notifyPrimaryNodeStateChange(serviceNode, nodeState) );
         }
         for (final ReportingTaskNode reportingTaskNode : getAllReportingTasks()) {
-            try (final NarCloseable narCloseable = NarCloseable.withComponentNarLoader(extensionManager, reportingTaskNode.getReportingTask().getClass(), reportingTaskNode.getIdentifier())) {
-                ReflectionUtils.quietlyInvokeMethodsWithAnnotation(OnPrimaryNodeStateChange.class, reportingTaskNode.getReportingTask(), nodeState);
-            }
+            processScheduler.submitFrameworkTask(() -> processScheduler.notifyPrimaryNodeStateChange(reportingTaskNode, nodeState) );
         }
 
         // update primary
@@ -2750,16 +2777,8 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             return "Cannot replay data from Provenance Event because the event does not specify the Source FlowFile Queue";
         }
 
-        final Set<Connection> connections = flowManager.findAllConnections();
-        FlowFileQueue queue = null;
-        for (final Connection connection : connections) {
-            if (event.getSourceQueueIdentifier().equals(connection.getIdentifier())) {
-                queue = connection.getFlowFileQueue();
-                break;
-            }
-        }
-
-        if (queue == null) {
+        final Connection connection = flowManager.getConnection(event.getSourceQueueIdentifier());
+        if (connection == null) {
             return "Cannot replay data from Provenance Event because the Source FlowFile Queue with ID " + event.getSourceQueueIdentifier() + " no longer exists";
         }
 
@@ -2787,10 +2806,28 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         }
 
         // Make sure event has the Content Claim info
-        final Long contentSize = event.getPreviousFileSize();
-        final String contentClaimId = event.getPreviousContentClaimIdentifier();
-        final String contentClaimSection = event.getPreviousContentClaimSection();
-        final String contentClaimContainer = event.getPreviousContentClaimContainer();
+        boolean usePrevious = true;
+        Long contentSize = event.getPreviousFileSize();
+        String contentClaimId = event.getPreviousContentClaimIdentifier();
+        String contentClaimSection = event.getPreviousContentClaimSection();
+        String contentClaimContainer = event.getPreviousContentClaimContainer();
+        Long contentClaimOffset = event.getPreviousContentClaimOffset();
+
+        final int previousClaimNulls = countNulls(contentSize, contentClaimId, contentClaimSection, contentClaimContainer);
+        if (previousClaimNulls == 4) {
+            contentClaimId = event.getContentClaimIdentifier();
+            contentClaimSection = event.getContentClaimSection();
+            contentClaimContainer = event.getContentClaimContainer();
+
+            final int currentClaimNullCounts = countNulls(contentClaimId, contentClaimSection, contentClaimContainer);
+
+            // If the current claim is also all null, we will stick with using the previous. Otherwise, we'll denote that we're using the current claim
+            usePrevious = currentClaimNullCounts == 3;
+            if (!usePrevious) {
+                contentSize = event.getFileSize();
+                contentClaimOffset = event.getContentClaimOffset();
+            }
+        }
 
         // All content fields must be null or no content fields can be null.
         final int nullCount = countNulls(contentSize, contentClaimId, contentClaimSection, contentClaimContainer);
@@ -2803,16 +2840,8 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             throw new IllegalArgumentException("Cannot replay data from Provenance Event because the event does not specify the Source FlowFile Queue");
         }
 
-        final Set<Connection> connections = flowManager.findAllConnections();
-        FlowFileQueue queue = null;
-        for (final Connection connection : connections) {
-            if (event.getSourceQueueIdentifier().equals(connection.getIdentifier())) {
-                queue = connection.getFlowFileQueue();
-                break;
-            }
-        }
-
-        if (queue == null) {
+        final Connection connection = flowManager.getConnection(event.getSourceQueueIdentifier());
+        if (connection == null) {
             throw new IllegalStateException("Cannot replay data from Provenance Event because the Source FlowFile Queue with ID " + event.getSourceQueueIdentifier() + " no longer exists");
         }
 
@@ -2828,18 +2857,17 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             // being written to by the Content Repository. This is important only because we are creating a FlowFile with this Resource
             // Claim. If, for instance, we are simply creating the claim to request its content, as in #getContentAvailability, etc.
             // then this is not necessary.
-            ResourceClaim resourceClaim = resourceClaimManager.getResourceClaim(event.getPreviousContentClaimContainer(),
-                event.getPreviousContentClaimSection(), event.getPreviousContentClaimIdentifier());
+            ResourceClaim resourceClaim = resourceClaimManager.getResourceClaim(contentClaimContainer, contentClaimSection, contentClaimId);
             if (resourceClaim == null) {
-                resourceClaim = resourceClaimManager.newResourceClaim(event.getPreviousContentClaimContainer(),
-                    event.getPreviousContentClaimSection(), event.getPreviousContentClaimIdentifier(), false, false);
+                resourceClaim = resourceClaimManager.newResourceClaim(contentClaimContainer,
+                    contentClaimSection, contentClaimId, false, false);
             }
 
             // Increment Claimant Count, since we will now be referencing the Content Claim
             resourceClaimManager.incrementClaimantCount(resourceClaim);
-            final long claimOffset = event.getPreviousContentClaimOffset() == null ? 0L : event.getPreviousContentClaimOffset();
+            final long claimOffset = contentClaimOffset == null ? 0L : contentClaimOffset;
             contentClaim = new StandardContentClaim(resourceClaim, claimOffset);
-            contentClaim.setLength(event.getPreviousFileSize() == null ? -1L : event.getPreviousFileSize());
+            contentClaim.setLength(contentSize == null ? -1L : contentSize);
 
             if (!contentRepository.isAccessible(contentClaim)) {
                 resourceClaimManager.decrementClaimantCount(resourceClaim);
@@ -2862,7 +2890,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         // FlowFileRecord's contentClaimOffset to 0.
         final FlowFileRecord flowFileRecord = new StandardFlowFileRecord.Builder()
                 // Copy relevant info from source FlowFile
-                .addAttributes(event.getPreviousAttributes())
+                .addAttributes(usePrevious ? event.getPreviousAttributes() : event.getAttributes())
                 .contentClaim(contentClaim)
                 .contentClaimOffset(0L) // use 0 because we used the content claim offset in the Content Claim itself
                 .entryDate(System.currentTimeMillis())
@@ -2892,10 +2920,12 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
                 .setLineageStartDate(event.getLineageStartDate())
                 .setComponentType(event.getComponentType())
                 .setComponentId(event.getComponentId())
+                .setSourceQueueIdentifier(event.getSourceQueueIdentifier())
                 .build();
         provenanceRepository.registerEvent(replayEvent);
 
         // Update the FlowFile Repository to indicate that we have added the FlowFile to the flow
+        final FlowFileQueue queue = connection.getFlowFileQueue();
         final StandardRepositoryRecord record = new StandardRepositoryRecord(queue);
         record.setWorking(flowFileRecord, false);
         record.setDestination(queue);
@@ -2979,12 +3009,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         try {
             HeartbeatBean bean = heartbeatBeanRef.get();
             if (bean == null) {
-                readLock.lock();
-                try {
-                    bean = new HeartbeatBean(flowManager.getRootGroup(), isPrimary());
-                } finally {
-                    readLock.unlock("createHeartbeatMessage");
-                }
+                bean = new HeartbeatBean(flowManager.getRootGroup(), isPrimary());
             }
 
             // create heartbeat payload
@@ -2993,7 +3018,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             hbPayload.setActiveThreadCount(getActiveThreadCount());
             hbPayload.setRevisionUpdateCount(revisionManager.getRevisionUpdateCount());
 
-            final QueueSize queueSize = getTotalFlowFileCount(bean.getRootGroup());
+            final QueueSize queueSize = bean.getRootGroup().getQueueSize();
             hbPayload.setTotalFlowFileCount(queueSize.getObjectCount());
             hbPayload.setTotalFlowFileBytes(queueSize.getByteCount());
             hbPayload.setClusterStatus(clusterCoordinator.getConnectionStatuses());
@@ -3032,6 +3057,15 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         }
     }
 
+    /**
+     * Returns a number between 0 (inclusive) and 100 (inclusive) that indicates the percentage of time that processors should
+     * track detailed performance, such as CPU seconds used and time reading from/writing to content repo, etc.
+     * @return the percentage of time that detailed performance metrics should be tracked. A value of 0 indicates that these metrics
+     * should never be tracked; a value of 100 indicates that these metrics should always be tracked.
+     */
+    public int getPerformanceTrackingPercentage() {
+        return nifiProperties.getPerformanceMetricTrackingPercentage();
+    }
 
     public Integer getRemoteSiteListeningPort() {
         return remoteInputSocketPort;

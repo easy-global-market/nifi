@@ -18,14 +18,14 @@
     <parent>
         <groupId>org.apache.nifi</groupId>
         <artifactId>nifi-commons</artifactId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
     <artifactId>nifi-flow-encryptor</artifactId>
     <dependencies>
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-property-encryptor</artifactId>
-            <version>1.16.0-SNAPSHOT</version>
+            <version>1.21.0</version>
             <exclusions>
                 <!-- Excluded to avoid unnecessary runtime dependencies -->
                 <exclusion>
@@ -33,6 +33,16 @@
                     <artifactId>nifi-properties</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-xml-processing</artifactId>
+            <version>1.21.0</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
     </dependencies>
 </project>

@@ -21,38 +21,41 @@ import org.apache.nifi.snmp.configuration.V2TrapConfiguration;
 import org.apache.nifi.snmp.factory.trap.V1TrapPDUFactory;
 import org.apache.nifi.snmp.factory.trap.V2TrapPDUFactory;
 import org.apache.nifi.util.MockComponentLog;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.snmp4j.PDU;
 import org.snmp4j.Snmp;
 import org.snmp4j.Target;
+import org.snmp4j.event.ResponseEvent;
 
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Collections;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-public class SendTrapSNMPHandlerTest {
+class SendTrapSNMPHandlerTest {
 
     private Target mockTarget;
     private Snmp mockSnmpManager;
     private PDU mockPdu;
+    private ResponseEvent mockResponseEvent;
     private MockComponentLog mockComponentLog;
     private V1TrapConfiguration mockV1TrapConfiguration;
     private V2TrapConfiguration mockV2TrapConfiguration;
     private SNMPResourceHandler snmpResourceHandler;
     private SendTrapSNMPHandler sendTrapSNMPHandler;
 
-    @Before
-    public void init() {
+    @BeforeEach
+    public void init() throws IOException {
         mockTarget = mock(Target.class);
         mockSnmpManager = mock(Snmp.class);
         mockPdu = mock(PDU.class);
+        mockResponseEvent = mock(ResponseEvent.class);
         mockComponentLog = new MockComponentLog("id", new Object());
         mockV1TrapConfiguration = mock(V1TrapConfiguration.class);
         mockV2TrapConfiguration = mock(V2TrapConfiguration.class);
@@ -60,6 +63,8 @@ public class SendTrapSNMPHandlerTest {
         when(mockV1TrapPDUFactory.get(mockV1TrapConfiguration)).thenReturn(mockPdu);
         V2TrapPDUFactory mockV2TrapPDUFactory = mock(V2TrapPDUFactory.class);
         when(mockV2TrapPDUFactory.get(mockV2TrapConfiguration)).thenReturn(mockPdu);
+
+        when(mockSnmpManager.send(mockPdu, mockTarget)).thenReturn(mockResponseEvent);
 
         snmpResourceHandler = new SNMPResourceHandler(mockSnmpManager, mockTarget);
 
@@ -76,13 +81,13 @@ public class SendTrapSNMPHandlerTest {
         };
     }
 
-    @After
+    @AfterEach
     public void tearDown() {
         snmpResourceHandler.close();
     }
 
     @Test
-    public void testSendV1TrapWithValidFlowfile() throws IOException {
+    void testSendV1TrapWithValidFlowfile() throws IOException {
         final String flowFileOid = "1.3.6.1.2.1.1.1.0";
         sendTrapSNMPHandler.sendTrap(Collections.singletonMap("snmp$" + flowFileOid, "OID value"), mockV1TrapConfiguration);
 
@@ -90,7 +95,7 @@ public class SendTrapSNMPHandlerTest {
     }
 
     @Test
-    public void testSendV2TrapWithValidFlowfile() throws IOException {
+    void testSendV2TrapWithValidFlowfile() throws IOException {
         final String flowFileOid = "1.3.6.1.2.1.1.1.0";
         sendTrapSNMPHandler.sendTrap(Collections.singletonMap("snmp$" + flowFileOid, "OID value"), mockV2TrapConfiguration);
 
@@ -98,7 +103,7 @@ public class SendTrapSNMPHandlerTest {
     }
 
     @Test
-    public void testSendV1TrapWithFlowfileWithoutOptionalSnmpAttributes() throws IOException {
+    void testSendV1TrapWithFlowfileWithoutOptionalSnmpAttributes() throws IOException {
         sendTrapSNMPHandler.sendTrap(Collections.singletonMap("invalid key", "invalid value"), mockV1TrapConfiguration);
 
         verify(mockSnmpManager).send(mockPdu, mockTarget);

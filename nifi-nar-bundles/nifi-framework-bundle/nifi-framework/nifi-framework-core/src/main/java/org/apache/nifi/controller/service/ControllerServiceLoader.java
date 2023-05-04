@@ -23,26 +23,15 @@ import org.apache.nifi.controller.serialization.FlowEncodingVersion;
 import org.apache.nifi.controller.serialization.FlowFromDOMFactory;
 import org.apache.nifi.encrypt.PropertyEncryptor;
 import org.apache.nifi.groups.ProcessGroup;
-import org.apache.nifi.reporting.BulletinRepository;
-import org.apache.nifi.security.xml.XmlUtils;
+import org.apache.nifi.logging.LogLevel;
 import org.apache.nifi.util.BundleUtils;
-import org.apache.nifi.util.DomUtils;
 import org.apache.nifi.web.api.dto.BundleDTO;
 import org.apache.nifi.web.api.dto.ControllerServiceDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Document;
 import org.w3c.dom.Element;
-import org.xml.sax.SAXException;
-import org.xml.sax.SAXParseException;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.ParserConfigurationException;
-import java.io.BufferedInputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -51,58 +40,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 public class ControllerServiceLoader {
 
     private static final Logger logger = LoggerFactory.getLogger(ControllerServiceLoader.class);
-
-    public static List<ControllerServiceNode> loadControllerServices(final FlowController controller, final InputStream serializedStream, final ProcessGroup parentGroup,
-        final PropertyEncryptor encryptor, final BulletinRepository bulletinRepo, final boolean autoResumeState, final FlowEncodingVersion encodingVersion) throws IOException {
-
-        try (final InputStream in = new BufferedInputStream(serializedStream)) {
-            final DocumentBuilder builder = XmlUtils.createSafeDocumentBuilder(null);
-
-            builder.setErrorHandler(new org.xml.sax.ErrorHandler() {
-
-                @Override
-                public void fatalError(final SAXParseException err) throws SAXException {
-                    logger.error("Config file line " + err.getLineNumber() + ", col " + err.getColumnNumber() + ", uri " + err.getSystemId() + " :message: " + err.getMessage());
-                    if (logger.isDebugEnabled()) {
-                        logger.error("Error Stack Dump", err);
-                    }
-                    throw err;
-                }
-
-                @Override
-                public void error(final SAXParseException err) throws SAXParseException {
-                    logger.error("Config file line " + err.getLineNumber() + ", col " + err.getColumnNumber() + ", uri " + err.getSystemId() + " :message: " + err.getMessage());
-                    if (logger.isDebugEnabled()) {
-                        logger.error("Error Stack Dump", err);
-                    }
-                    throw err;
-                }
-
-                @Override
-                public void warning(final SAXParseException err) throws SAXParseException {
-                    logger.warn(" Config file line " + err.getLineNumber() + ", uri " + err.getSystemId() + " : message : " + err.getMessage());
-                    if (logger.isDebugEnabled()) {
-                        logger.warn("Warning stack dump", err);
-                    }
-                    throw err;
-                }
-            });
-
-            final Document document = builder.parse(in);
-            final Element controllerServices = document.getDocumentElement();
-            final List<Element> serviceElements = DomUtils.getChildElementsByTagName(controllerServices, "controllerService");
-
-            final Map<ControllerServiceNode, Element> controllerServiceMap = ControllerServiceLoader.loadControllerServices(serviceElements, controller, parentGroup, encryptor, encodingVersion);
-            enableControllerServices(controllerServiceMap, controller, encryptor, autoResumeState, encodingVersion);
-            return new ArrayList<>(controllerServiceMap.keySet());
-        } catch (SAXException | ParserConfigurationException sxe) {
-            throw new IOException(sxe);
-        }
-    }
 
     public static Map<ControllerServiceNode, Element> loadControllerServices(final List<Element> serviceElements, final FlowController controller,
                                                                              final ProcessGroup parentGroup, final PropertyEncryptor encryptor, final FlowEncodingVersion encodingVersion) {
@@ -176,6 +118,7 @@ public class ControllerServiceLoader {
                 controllerService.getBundleCoordinate(), Collections.emptySet(), false, true, null);
         clone.setName(controllerService.getName());
         clone.setComments(controllerService.getComments());
+        clone.setBulletinLevel(controllerService.getBulletinLevel());
 
         if (controllerService.getProperties() != null) {
             Map<String,String> properties = new HashMap<>();
@@ -207,6 +150,15 @@ public class ControllerServiceLoader {
         final ControllerServiceNode node = flowController.getFlowManager().createControllerService(dto.getType(), dto.getId(), coordinate, Collections.emptySet(), false, true, null);
         node.setName(dto.getName());
         node.setComments(dto.getComments());
+
+        if (dto.getBulletinLevel() != null) {
+            node.setBulletinLevel(LogLevel.valueOf(dto.getBulletinLevel()));
+        } else {
+            // this situation exists for backward compatibility with nifi 1.16 and earlier where controller services do not have bulletinLevels set in flow.xml/flow.json
+            // and bulletinLevels are at the WARN level by default
+            node.setBulletinLevel(LogLevel.WARN);
+        }
+
         node.setVersionedComponentId(dto.getVersionedComponentId());
         return node;
     }
@@ -217,10 +169,20 @@ public class ControllerServiceLoader {
         node.pauseValidationTrigger();
         try {
             node.setAnnotationData(dto.getAnnotationData());
-            node.setProperties(dto.getProperties());
+            final Set<String> sensitiveDynamicPropertyNames = getSensitiveDynamicPropertyNames(dto.getSensitiveDynamicPropertyNames(), node);
+            node.setProperties(dto.getProperties(), false, sensitiveDynamicPropertyNames);
         } finally {
             node.resumeValidationTrigger();
         }
     }
 
+    private static Set<String> getSensitiveDynamicPropertyNames(final Set<String> parsedSensitivePropertyNames, final ControllerServiceNode controllerServiceNode) {
+        final Set<String> sensitivePropertyNames = parsedSensitivePropertyNames == null ? Collections.emptySet() : parsedSensitivePropertyNames;
+        return sensitivePropertyNames.stream().filter(
+                propertyName -> {
+                    final PropertyDescriptor propertyDescriptor = controllerServiceNode.getPropertyDescriptor(propertyName);
+                    return propertyDescriptor.isDynamic();
+                }
+        ).collect(Collectors.toSet());
+    }
 }

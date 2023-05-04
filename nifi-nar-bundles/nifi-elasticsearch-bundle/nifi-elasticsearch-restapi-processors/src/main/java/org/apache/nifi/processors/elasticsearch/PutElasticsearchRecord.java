@@ -79,7 +79,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
-@Tags({"json", "elasticsearch", "elasticsearch5", "elasticsearch6", "elasticsearch7", "put", "index", "record"})
+@Tags({"json", "elasticsearch", "elasticsearch5", "elasticsearch6", "elasticsearch7", "elasticsearch8", "put", "index", "record"})
 @CapabilityDescription("A record-aware Elasticsearch put processor that uses the official Elastic REST client libraries.")
 @WritesAttributes({
         @WritesAttribute(attribute = "elasticsearch.put.error", description = "The error message provided by Elasticsearch if there is an error indexing the documents."),
@@ -333,10 +333,10 @@ public class PutElasticsearchRecord extends AbstractPutElasticsearch {
         final String atTimestampPath = context.getProperty(AT_TIMESTAMP_RECORD_PATH).evaluateAttributeExpressions(input).getValue();
 
         final RecordPath ioPath = indexOpPath != null ? recordPathCache.getCompiled(indexOpPath) : null;
-        final RecordPath path = idPath != null ? recordPathCache.getCompiled(idPath) : null;
+        final RecordPath path = StringUtils.isNotBlank(idPath) ? recordPathCache.getCompiled(idPath) : null;
         final RecordPath iPath = indexPath != null ? recordPathCache.getCompiled(indexPath) : null;
         final RecordPath tPath = typePath != null ? recordPathCache.getCompiled(typePath) : null;
-        final RecordPath atPath = atTimestampPath != null ? recordPathCache.getCompiled(atTimestampPath) : null;
+        final RecordPath atPath = StringUtils.isNotBlank(atTimestampPath) ? recordPathCache.getCompiled(atTimestampPath) : null;
 
         final boolean retainId = context.getProperty(RETAIN_ID_FIELD).evaluateAttributeExpressions(input).asBoolean();
         final boolean retainTimestamp = context.getProperty(RETAIN_AT_TIMESTAMP_FIELD).evaluateAttributeExpressions(input).asBoolean();
@@ -373,7 +373,9 @@ public class PutElasticsearchRecord extends AbstractPutElasticsearch {
                 final Map<String, Object> contentMap = (Map<String, Object>) DataTypeUtils
                         .convertRecordFieldtoObject(record, RecordFieldType.RECORD.getRecordDataType(record.getSchema()));
                 formatDateTimeFields(contentMap, record);
-                contentMap.putIfAbsent("@timestamp", timestamp);
+                if (timestamp != null) {
+                    contentMap.putIfAbsent("@timestamp", timestamp);
+                }
 
                 operationList.add(new IndexOperationRequest(idx, t, id, contentMap, o));
                 originals.add(record);
@@ -412,7 +414,7 @@ public class PutElasticsearchRecord extends AbstractPutElasticsearch {
         stopWatch.stop();
         session.getProvenanceReporter().send(
                 input,
-                clientService.getTransitUrl(String.join(",", indices), types.isEmpty() ? null : String.join(",", types)),
+                clientService.get().getTransitUrl(String.join(",", indices), types.isEmpty() ? null : String.join(",", types)),
                 String.format(Locale.getDefault(), "%d Elasticsearch _bulk operation batch(es) [%d error(s), %d success(es)]", batches, erroredRecords.get(), successfulRecords.get()),
                 stopWatch.getDuration(TimeUnit.MILLISECONDS)
         );
@@ -456,7 +458,7 @@ public class PutElasticsearchRecord extends AbstractPutElasticsearch {
     }
 
     private ResponseDetails indexDocuments(final BulkOperation bundle, final ProcessContext context, final ProcessSession session, final FlowFile input) throws IOException, SchemaNotFoundException {
-        final IndexOperationResponse response = clientService.bulk(bundle.getOperationList(), getUrlQueryParameters(context, input));
+        final IndexOperationResponse response = clientService.get().bulk(bundle.getOperationList(), getUrlQueryParameters(context, input));
 
         List<Predicate<Map<String, Object>>> errorItemFilters = new ArrayList<>(2);
         if (response.hasErrors()) {
@@ -562,7 +564,7 @@ public class PutElasticsearchRecord extends AbstractPutElasticsearch {
                 fieldValue.updateValue(null);
             }
 
-            return fieldValue.getValue().toString();
+            return fieldValue.toString();
         } else {
             return fallback;
         }

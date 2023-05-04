@@ -28,6 +28,7 @@ import org.apache.nifi.annotation.behavior.Restricted;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
 import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.behavior.SupportsBatching;
+import org.apache.nifi.annotation.behavior.SupportsSensitiveDynamicProperties;
 import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.TriggerWhenAnyDestinationAvailable;
@@ -44,8 +45,10 @@ import org.apache.nifi.components.ConfigurableComponent;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.documentation.init.DocumentationControllerServiceInitializationContext;
+import org.apache.nifi.documentation.init.DocumentationParameterProviderInitializationContext;
 import org.apache.nifi.documentation.init.DocumentationProcessorInitializationContext;
 import org.apache.nifi.documentation.init.DocumentationReportingInitializationContext;
+import org.apache.nifi.parameter.ParameterProvider;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.reporting.InitializationException;
@@ -85,6 +88,8 @@ public abstract class AbstractDocumentationWriter implements ExtensionDocumentat
                 initialize((ControllerService) component);
             } else if (component instanceof ReportingTask) {
                 initialize((ReportingTask) component);
+            } else if (component instanceof ParameterProvider) {
+                initialize((ParameterProvider) component);
             }
         } catch (final InitializationException ie) {
             throw new RuntimeException("Failed to initialize " + component, ie);
@@ -101,6 +106,10 @@ public abstract class AbstractDocumentationWriter implements ExtensionDocumentat
 
     protected void initialize(final ReportingTask reportingTask) throws InitializationException {
         reportingTask.initialize(new DocumentationReportingInitializationContext());
+    }
+
+    protected void initialize(final ParameterProvider parameterProvider) throws InitializationException {
+        parameterProvider.initialize(new DocumentationParameterProviderInitializationContext());
     }
 
     @Override
@@ -128,6 +137,7 @@ public abstract class AbstractDocumentationWriter implements ExtensionDocumentat
         writeTags(getTags(component));
         writeProperties(component.getPropertyDescriptors(), propertyServices);
         writeDynamicProperties(getDynamicProperties(component));
+        writeSupportsSensitiveDynamicProperties(component.getClass().getAnnotation(SupportsSensitiveDynamicProperties.class));
 
         if (component instanceof Processor) {
             final Processor processor = (Processor) component;
@@ -252,6 +262,9 @@ public abstract class AbstractDocumentationWriter implements ExtensionDocumentat
         if (component instanceof ReportingTask) {
             return ExtensionType.REPORTING_TASK;
         }
+        if (component instanceof ParameterProvider) {
+            return ExtensionType.PARAMETER_PROVIDER;
+        }
         throw new AssertionError("Encountered unknown Configurable Component Type for " + component);
     }
 
@@ -301,6 +314,8 @@ public abstract class AbstractDocumentationWriter implements ExtensionDocumentat
     protected abstract void writeTriggerWhenAnyDestinationAvailable(TriggerWhenAnyDestinationAvailable triggerWhenAnyDestinationAvailable) throws IOException;
 
     protected abstract void writeSupportsBatching(SupportsBatching supportsBatching) throws IOException;
+
+    protected abstract void writeSupportsSensitiveDynamicProperties(SupportsSensitiveDynamicProperties supportsSensitiveDynamicProperties) throws IOException;
 
     protected abstract void writeEventDriven(EventDriven eventDriven) throws IOException;
 

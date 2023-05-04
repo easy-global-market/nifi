@@ -19,12 +19,10 @@
     <parent>
         <groupId>org.apache.nifi</groupId>
         <artifactId>nifi-nar-bundles</artifactId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
 
-    <groupId>org.apache.nifi</groupId>
     <artifactId>nifi-splunk-bundle</artifactId>
-    <version>1.16.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -51,9 +49,8 @@
             <dependency>
                 <groupId>com.splunk</groupId>
                 <artifactId>splunk</artifactId>
-                <version>1.6.5.0</version>
+                <version>1.9.3</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
-
 </project>

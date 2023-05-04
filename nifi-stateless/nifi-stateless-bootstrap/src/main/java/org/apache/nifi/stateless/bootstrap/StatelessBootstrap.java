@@ -21,6 +21,7 @@ import org.apache.nifi.bundle.Bundle;
 import org.apache.nifi.bundle.BundleCoordinate;
 import org.apache.nifi.nar.NarClassLoader;
 import org.apache.nifi.nar.NarClassLoaders;
+import org.apache.nifi.nar.NarUnpackMode;
 import org.apache.nifi.nar.NarUnpacker;
 import org.apache.nifi.nar.SystemBundle;
 import org.apache.nifi.stateless.config.ParameterOverride;
@@ -36,13 +37,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -113,14 +112,17 @@ public class StatelessBootstrap {
         final Predicate<BundleCoordinate> narFilter = coordinate -> true;
         NarUnpackLock.lock();
         try {
-            NarUnpacker.unpackNars(systemBundle, frameworkWorkingDir, extensionsWorkingDir, null, narDirectories, false, NarClassLoaders.FRAMEWORK_NAR_ID, false, false, narFilter);
+            // For many environments where Stateless is to be run, the number of open file handles may be constrained. Because of this,
+            // we will unpack NARs using the Uber Jar method.
+            NarUnpacker.unpackNars(systemBundle, frameworkWorkingDir, extensionsWorkingDir, null, narDirectories, false, NarClassLoaders.FRAMEWORK_NAR_ID, false, false,
+                NarUnpackMode.UNPACK_TO_UBER_JAR, narFilter);
         } finally {
             NarUnpackLock.unlock();
         }
         final long unpackMillis = System.currentTimeMillis() - unpackStart;
         logger.info("Unpacked NAR files in {} millis", unpackMillis);
 
-        final BlockListClassLoader statelessClassLoader = createExtensionRootClassLoader(narDirectory, rootClassLoader);
+        final AllowListClassLoader statelessClassLoader = createExtensionRootClassLoader(narDirectory, rootClassLoader);
 
         final File statelessNarWorkingDir = locateStatelessNarWorkingDirectory(extensionsWorkingDir);
         final NarClassLoader engineClassLoader;
@@ -136,7 +138,7 @@ public class StatelessBootstrap {
 
     /**
      * Creates a ClassLoader that is to be used as the 'root'/parent for all NiFi Extensions' ClassLoaders. The ClassLoader will inherit from its parent
-     * any classes that exist in JAR files that can be found in the given NAR Directory. However, it will not allow any other classes to be loaded from the parent.
+     * any classes that exist in JAR files that can be found in the given NAR Directory or within the Java home directory. However, it will not allow any other classes to be loaded from the parent.
      * This approach is important because we need to ensure that the ClassLoader that is provided to extensions when run from NiFi Stateless is the same as the ClassLoader
      * that will be provided to it in traditional NiFi. Whereas in traditional NiFi, we have the ability to control the System ClassLoader, Stateless NiFi is designed to be
      * embedded, so we cannot control the System ClassLoader of the embedding application. This gives us a way to ensure that we control what is available to Extensions and
@@ -145,13 +147,9 @@ public class StatelessBootstrap {
      *
      * @param narDirectory the NAR directory whose .jar files should be made available via the parent.
      * @param parent the parent class loader that the given BlockListClassLoader should delegate to for classes that it does not block
-     * @return a BlockListClassLoader that allows only the appropriate classes to be loaded from the given parent
+     * @return an AllowListClassLoader that allows only the appropriate classes to be loaded from the given parent
      */
-    private static BlockListClassLoader createExtensionRootClassLoader(final File narDirectory, final ClassLoader parent) throws IOException {
-        if (!(parent instanceof URLClassLoader)) {
-            return new BlockListClassLoader(parent, Collections.emptySet());
-        }
-
+    protected static AllowListClassLoader createExtensionRootClassLoader(final File narDirectory, final ClassLoader parent) throws IOException {
         final File[] narDirectoryFiles = narDirectory.listFiles();
         if (narDirectoryFiles == null) {
             throw new IOException("Could not get a listing of the NAR directory");
@@ -159,19 +157,14 @@ public class StatelessBootstrap {
 
         logger.debug("NAR directory used to find files to allow being loaded by Stateless Extension Classloaders from parent {}: {}", parent, narDirectory);
 
-        final Set<URL> urls = new HashSet<>();
-        findClassLoaderUrls(parent, urls);
-
-        final Set<String> classesBlocked = new HashSet<>();
-        final Set<String> filesBlocked = new HashSet<>();
-        findClassNamesInJars(urls, classesBlocked, filesBlocked);
-
         final Set<String> classesAllowed = new HashSet<>();
         final Set<String> filesAllowed = new HashSet<>();
         for (final File file : narDirectoryFiles) {
             findClassNamesInJar(file, classesAllowed);
             filesAllowed.add(file.getName());
         }
+
+        findClassNamesInDirectory(narDirectory, narDirectory, classesAllowed, filesAllowed);
 
         final File java11Directory = new File(narDirectory, "java11");
         final File[] java11DirectoryFiles = java11Directory.listFiles();
@@ -181,48 +174,107 @@ public class StatelessBootstrap {
                 filesAllowed.add(file.getName());
             }
         }
-        logger.debug("The following JAR files are proposed to be blocked from being loaded by Stateless Extensions ClassLoaders from parent {}: {}", parent, filesBlocked);
-        logger.debug("Of the full list above, the following JAR files will be explicitly allowed to be loaded by Stateless Extensions ClassLoaders from parent {}: {}", parent, filesAllowed);
 
-        classesBlocked.removeAll(classesAllowed);
-        filesBlocked.removeAll(filesAllowed);
-        logger.debug("The final list of JAR files blocked from being loaded by Stateless Extensions ClassLoaders from parent {}: {}", parent, filesBlocked);
-
-        logger.debug("The final list of classes blocked from being loaded by Stateless Extension ClassLoaders from parent {}: {}", parent, classesBlocked);
-
-        final BlockListClassLoader blockingClassLoader = new BlockListClassLoader(parent, classesBlocked);
-        return blockingClassLoader;
-    }
-
-    private static void findClassNamesInJars(final Collection<URL> jarUrls, final Set<String> classesFound, final Set<String> jarFilesFound) throws IOException {
-        for (final URL url : jarUrls) {
-            final File file;
-            try {
-                file = new File(url.toURI());
-            } catch (URISyntaxException e) {
-                logger.warn("Could not find file for {} in classpath", url);
-                continue;
-            }
-
-            findClassNamesInJar(file, classesFound);
-            jarFilesFound.add(file.getName());
+        final Set<File> javaHomeFiles = findJavaHomeFiles();
+        final Set<String> javaHomeFilenames = new HashSet<>();
+        for (final File file : javaHomeFiles) {
+            findLoadableClasses(file, classesAllowed);
+            javaHomeFilenames.add(file.getName());
         }
+
+        logger.debug("The following class/JAR files will be explicitly allowed to be loaded by Stateless Extensions ClassLoaders from parent {}: {}", parent, filesAllowed);
+        logger.debug("The following JAR/JMOD files from ${JAVA_HOME} will be explicitly allowed to be loaded by Stateless Extensions ClassLoaders from parent {}: {}", parent, javaHomeFilenames);
+        logger.debug("The final list of classes allowed to be loaded by Stateless Extension ClassLoaders from parent {}: {}", parent, classesAllowed);
+        if (parent instanceof URLClassLoader) {
+            final URL[] parentUrls = ((URLClassLoader) parent).getURLs();
+            logger.debug("Parent ClassLoader has the following URLs loaded: {}", Arrays.asList(parentUrls));
+        } else {
+            logger.debug("Parent ClassLoader is not a URLClassLoader: {} / {}", parent, parent.getClass());
+        }
+
+        final AllowListClassLoader allowListClassLoader = new AllowListClassLoader(parent, classesAllowed);
+        return allowListClassLoader;
     }
 
-    private static void findClassLoaderUrls(final ClassLoader classLoader, final Set<URL> urls) {
-        if (classLoader == null) {
+    private static Set<File> findJavaHomeFiles() {
+        final String javaHomeValue = System.getProperty("java.home");
+        if (javaHomeValue == null) {
+            logger.warn("Could not find java.home system property so will not allow any classes explicitly from java.home in AllowListClassLoader");
+            return Collections.emptySet();
+        }
+
+        final File javaHome = new File(javaHomeValue);
+        if (!javaHome.exists()) {
+            logger.warn("System property for java.home is {} but that directory does not exist so will not allow any classes explicitly from java.home in AllowListClassLoader", javaHomeValue);
+            return Collections.emptySet();
+        }
+        logger.debug("Java Home Directory is {}", javaHome.getAbsolutePath());
+
+        final File[] javaHomeFiles = javaHome.listFiles();
+        if (javaHomeFiles == null) {
+            logger.warn("System property for java.home is {} but that directory is not readable so will not allow any classes explicitly from java.home in AllowListClassLoader", javaHomeValue);
+            return Collections.emptySet();
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("Found the following files in Java Home: {}", Arrays.asList(javaHomeFiles));
+            logger.debug("Full listing of Java Home:");
+            logFullJavaHomeListing(javaHomeFiles);
+        }
+
+        final Set<File> loadableFiles = new HashSet<>();
+        for (final File file : javaHomeFiles) {
+            findLoadableFiles(file, loadableFiles);
+        }
+
+        return loadableFiles;
+    }
+
+    private static void logFullJavaHomeListing(final File[] files) {
+        if (files == null) {
             return;
         }
 
-        if (classLoader instanceof URLClassLoader) {
-            final URLClassLoader urlClassLoader = (URLClassLoader) classLoader;
-            urls.addAll(Arrays.asList(urlClassLoader.getURLs()));
+        for (final File file : files) {
+            if (file.isDirectory()) {
+                logger.debug(file.getAbsolutePath() + "/");
+                final File[] children = file.listFiles();
+                if (children == null) {
+                    logger.debug("Failed to perform listing of directory {}", file);
+                    continue;
+                }
+
+                logFullJavaHomeListing(children);
+            } else {
+                logger.debug(file.getAbsolutePath());
+            }
+        }
+    }
+
+    private static void findLoadableFiles(final File file, final Set<File> loadable) {
+        if (file.isDirectory()) {
+            final File[] children = file.listFiles();
+            if (children == null) {
+                logger.debug("Unable to obtain listing of files for directory {}", file.getAbsolutePath());
+                return;
+            }
+
+            for (final File child : children) {
+                findLoadableFiles(child, loadable);
+            }
+
+            return;
         }
 
-        // If the classLoader is the system class loader, we are done. We don't want to process the parent of
-        // the system class loader (which would be the Launcher$ExtClassLoader that contains the JDK/JRE classes, etc)
-        if (classLoader != ClassLoader.getSystemClassLoader()) {
-            findClassLoaderUrls(classLoader.getParent(), urls);
+        final String filename = file.getName();
+        if (filename.endsWith(".jar")) {
+            loadable.add(file);
+        }
+    }
+
+    private static void findLoadableClasses(final File file, final Set<String> classNames) throws IOException {
+        final String filename = file.getName();
+        if (filename.endsWith(".jar")) {
+            findClassNamesInJar(file, classNames);
         }
     }
 
@@ -231,17 +283,48 @@ public class StatelessBootstrap {
             return;
         }
 
-        final JarFile jarFile = new JarFile(file);
-        final Enumeration<? extends ZipEntry> enumeration = jarFile.entries();
-        while (enumeration.hasMoreElements()) {
-            final ZipEntry zipEntry = enumeration.nextElement();
-            final String entryName = zipEntry.getName();
+        try (final JarFile jarFile = new JarFile(file)) {
+            final Enumeration<? extends ZipEntry> enumeration = jarFile.entries();
+            while (enumeration.hasMoreElements()) {
+                final ZipEntry zipEntry = enumeration.nextElement();
+                final String entryName = zipEntry.getName();
 
-            if (entryName.endsWith(".class")) {
-                final int lastIndex = entryName.lastIndexOf(".class");
-                final String className = entryName.substring(0, lastIndex).replace("/", ".");
-                classNames.add(className);
+                if (entryName.endsWith(".class")) {
+                    final int lastIndex = entryName.lastIndexOf(".class");
+                    final String className = entryName.substring(0, lastIndex).replace("/", ".");
+                    classNames.add(className);
+                }
             }
+        }
+    }
+
+    static void findClassNamesInDirectory(final File file, final File baseDirectory, final Set<String> classNames, final Set<String> fileNames) {
+        if (file.isDirectory()) {
+            final File[] children = file.listFiles();
+            if (children != null) {
+                for (final File child : children) {
+                    findClassNamesInDirectory(child, baseDirectory, classNames, fileNames);
+                }
+            }
+
+            return;
+        }
+
+        final String filename = file.getName();
+        if (filename.endsWith(".class")) {
+            final String absolutePath = file.getAbsolutePath();
+            final String baseDirectoryPath = baseDirectory.getAbsolutePath();
+            if (!absolutePath.startsWith(baseDirectoryPath)) {
+                return;
+            }
+
+            final File relativeFile = baseDirectory.toPath().relativize(file.toPath()).toFile();
+            final String relativePath = relativeFile.getPath();
+
+            final int lastIndex = relativePath.lastIndexOf(".class");
+            final String className = relativePath.substring(0, lastIndex).replace(File.separator, ".");
+            classNames.add(className);
+            fileNames.add(filename);
         }
     }
 

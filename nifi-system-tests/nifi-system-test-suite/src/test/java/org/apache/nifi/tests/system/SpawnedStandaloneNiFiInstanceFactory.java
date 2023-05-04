@@ -33,12 +33,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Properties;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SpawnedStandaloneNiFiInstanceFactory implements NiFiInstanceFactory {
     private static final Logger logger = LoggerFactory.getLogger(SpawnedStandaloneNiFiInstanceFactory.class);
@@ -123,18 +122,17 @@ public class SpawnedStandaloneNiFiInstanceFactory implements NiFiInstanceFactory
             final File destinationLib = new File(instanceDirectory, "lib");
             copyContents(new File("target/nifi-lib-assembly/lib"), destinationLib);
 
+            final File destinationNarProviderNars = new File(instanceDirectory, "nifi-nar-provider-nars");
+            copyContents(new File("target/nifi-nar-provider-nars"), destinationNarProviderNars);
+
+            final File destinationExtensionsDir = new File(instanceDirectory, "extensions");
+            destinationExtensionsDir.mkdir();
+
             final File destinationCertsDir = new File(instanceDirectory, "certs");
             if (!destinationCertsDir.exists()) {
                 assertTrue(destinationCertsDir.mkdirs());
             }
-
-            // Copy keystore
-            final File destinationKeystore = new File(destinationCertsDir, "keystore.jks");
-            Files.copy(Paths.get("src/test/resources/keystore.jks"), destinationKeystore.toPath());
-
-            // Copy truststore
-            final File destinationTruststore = new File(destinationCertsDir, "truststore.jks");
-            Files.copy(Paths.get("src/test/resources/truststore.jks"), destinationTruststore.toPath());
+            NiFiSystemKeyStoreProvider.configureKeyStores(destinationCertsDir);
 
             final File flowXmlGz = instanceConfiguration.getFlowXmlGz();
             if (flowXmlGz != null) {
@@ -203,9 +201,8 @@ public class SpawnedStandaloneNiFiInstanceFactory implements NiFiInstanceFactory
                     try {
                         Thread.sleep(1000L);
                     } catch (InterruptedException ex) {
+                        logger.debug("NiFi Startup sleep interrupted", ex);
                     }
-
-                    continue;
                 }
             }
         }

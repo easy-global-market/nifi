@@ -27,6 +27,8 @@ import org.apache.nifi.distributed.cache.client.adapter.NullInboundAdapter;
 import org.apache.nifi.distributed.cache.client.adapter.OutboundAdapter;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The {@link io.netty.channel.ChannelHandler} responsible for sending client requests and receiving server responses
@@ -43,6 +45,15 @@ public class CacheClientRequestHandler extends ChannelInboundHandlerAdapter {
      * The synchronization construct used to signal the client application that the server response has been received.
      */
     private ChannelPromise channelPromise;
+
+    /**
+     * THe network timeout associated with the connection
+     */
+    private final long timeoutMillis;
+
+    public CacheClientRequestHandler(final long timeoutMillis) {
+        this.timeoutMillis = timeoutMillis;
+    }
 
     @Override
     public void channelRead(final ChannelHandlerContext ctx, final Object msg) {
@@ -90,16 +101,23 @@ public class CacheClientRequestHandler extends ChannelInboundHandlerAdapter {
     public void invoke(final Channel channel, final OutboundAdapter outboundAdapter, final InboundAdapter inboundAdapter) throws IOException {
         final CacheClientHandshakeHandler handshakeHandler = channel.pipeline().get(CacheClientHandshakeHandler.class);
         handshakeHandler.waitHandshakeComplete();
-        if (handshakeHandler.getVersionNegotiator().getVersion() < outboundAdapter.getMinimumVersion()) {
-            throw new UnsupportedOperationException("Remote cache server doesn't support protocol version " + outboundAdapter.getMinimumVersion());
-        }
-        this.inboundAdapter = inboundAdapter;
-        channelPromise = channel.newPromise();
-        channel.writeAndFlush(Unpooled.wrappedBuffer(outboundAdapter.toBytes()));
-        channelPromise.awaitUninterruptibly();
-        this.inboundAdapter = new NullInboundAdapter();
-        if (channelPromise.cause() != null) {
-            throw new IOException("Request invocation failed", channelPromise.cause());
+        if (handshakeHandler.isSuccess()) {
+            if (handshakeHandler.getVersionNegotiator().getVersion() < outboundAdapter.getMinimumVersion()) {
+                throw new UnsupportedOperationException("Remote cache server doesn't support protocol version " + outboundAdapter.getMinimumVersion());
+            }
+            this.inboundAdapter = inboundAdapter;
+            channelPromise = channel.newPromise();
+            channel.writeAndFlush(Unpooled.wrappedBuffer(outboundAdapter.toBytes()));
+            final boolean completed = channelPromise.awaitUninterruptibly(timeoutMillis, TimeUnit.MILLISECONDS);
+            if (!completed) {
+                throw new SocketTimeoutException(String.format("Request invocation timeout [%d ms] to remote address [%s]", timeoutMillis, channel.remoteAddress()));
+            }
+            this.inboundAdapter = new NullInboundAdapter();
+            if (channelPromise.cause() != null) {
+                throw new IOException("Request invocation failed", channelPromise.cause());
+            }
+        } else {
+            throw new IOException("Request invocation failed", handshakeHandler.cause());
         }
     }
 }

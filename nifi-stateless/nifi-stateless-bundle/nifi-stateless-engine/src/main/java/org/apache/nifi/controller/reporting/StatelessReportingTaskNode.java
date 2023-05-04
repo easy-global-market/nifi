@@ -19,6 +19,7 @@ package org.apache.nifi.controller.reporting;
 
 import org.apache.nifi.authorization.Resource;
 import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.validation.ValidationTrigger;
 import org.apache.nifi.controller.LoggableComponent;
 import org.apache.nifi.controller.ProcessScheduler;
@@ -32,6 +33,9 @@ import org.apache.nifi.registry.ComponentVariableRegistry;
 import org.apache.nifi.reporting.ReportingContext;
 import org.apache.nifi.reporting.ReportingTask;
 import org.apache.nifi.stateless.engine.StatelessEngine;
+
+import java.util.Collections;
+import java.util.List;
 
 public class StatelessReportingTaskNode extends AbstractReportingTaskNode implements ReportingTaskNode {
     private final FlowManager flowManager;
@@ -47,13 +51,36 @@ public class StatelessReportingTaskNode extends AbstractReportingTaskNode implem
     }
 
     @Override
+    protected List<ValidationResult> validateConfig() {
+        return Collections.emptyList();
+    }
+
+    @Override
     protected ParameterContext getParameterContext() {
         return null;
     }
 
     @Override
     public ReportingContext getReportingContext() {
-        return new StatelessReportingContext(statelessEngine, flowManager, getEffectivePropertyValues(), getReportingTask(), getVariableRegistry(), getParameterLookup());
+        return new StatelessReportingContext(statelessEngine, flowManager, getEffectivePropertyValues(), this, getVariableRegistry(), getParameterLookup());
+    }
+
+    @Override
+    public void start() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void stop() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void enable() {
+    }
+
+    @Override
+    public void disable() {
     }
 
     @Override
@@ -80,4 +107,6 @@ public class StatelessReportingTaskNode extends AbstractReportingTaskNode implem
     public Resource getResource() {
         return null;
     }
+
+
 }

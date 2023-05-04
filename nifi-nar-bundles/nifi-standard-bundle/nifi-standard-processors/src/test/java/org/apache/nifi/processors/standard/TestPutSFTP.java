@@ -17,278 +17,193 @@
 package org.apache.nifi.processors.standard;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processors.standard.util.FileTransfer;
 import org.apache.nifi.processors.standard.util.SFTPTransfer;
 import org.apache.nifi.processors.standard.util.SSHTestServer;
-import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.provenance.ProvenanceEventRecord;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Collections;
+import java.util.List;
 
-public class TestPutSFTP {
-    private TestRunner putSFTPRunner;
-    private static SSHTestServer sshTestServer;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
-    private final String testFile = "src" + File.separator + "test" + File.separator + "resources" + File.separator + "hello.txt";
+class TestPutSFTP {
+    private static final String FLOW_FILE_CONTENTS = TestPutSFTP.class.getSimpleName();
 
-    @BeforeClass
-    public static void setupSSHD() throws IOException {
+    private static final String LOCALHOST = "localhost";
+
+    private static final String REMOTE_DIRECTORY = "nifi_test/";
+
+    private static final String FIRST_FILENAME = "1.txt";
+
+    private static final int BATCH_SIZE = 2;
+
+    private static final byte[] ZERO_BYTES = new byte[]{};
+
+    private static final String TRANSIT_URI_FORMAT = "sftp://%s";
+
+    private SSHTestServer sshTestServer;
+
+    private TestRunner runner;
+
+    @BeforeEach
+    void setRunner() throws IOException {
         sshTestServer = new SSHTestServer();
         sshTestServer.startServer();
+
+        runner = TestRunners.newTestRunner(PutSFTP.class);
+        runner.setProperty(SFTPTransfer.HOSTNAME, LOCALHOST);
+        runner.setProperty(SFTPTransfer.PORT, Integer.toString(sshTestServer.getSSHPort()));
+        runner.setProperty(SFTPTransfer.USERNAME, sshTestServer.getUsername());
+        runner.setProperty(SFTPTransfer.PASSWORD, sshTestServer.getPassword());
+        runner.setProperty(SFTPTransfer.STRICT_HOST_KEY_CHECKING, Boolean.FALSE.toString());
+        runner.setProperty(SFTPTransfer.BATCH_SIZE, Integer.toString(BATCH_SIZE));
+        runner.setProperty(SFTPTransfer.REMOTE_PATH, REMOTE_DIRECTORY);
+        runner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, Boolean.TRUE.toString());
+        runner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REPLACE);
+        runner.setProperty(SFTPTransfer.CREATE_DIRECTORY, Boolean.TRUE.toString());
+        runner.setProperty(SFTPTransfer.DATA_TIMEOUT, "30 sec");
+        runner.setValidateExpressionUsage(false);
     }
 
-    @AfterClass
-    public static void cleanupSSHD() throws IOException {
+    @AfterEach
+    void clearDirectory() throws IOException {
         sshTestServer.stopServer();
-    }
-
-    @Before
-    public void setup(){
-        putSFTPRunner = TestRunners.newTestRunner(PutSFTP.class);
-        putSFTPRunner.setProperty(SFTPTransfer.HOSTNAME, "localhost");
-        putSFTPRunner.setProperty(SFTPTransfer.PORT, Integer.toString(sshTestServer.getSSHPort()));
-        putSFTPRunner.setProperty(SFTPTransfer.USERNAME, sshTestServer.getUsername());
-        putSFTPRunner.setProperty(SFTPTransfer.PASSWORD, sshTestServer.getPassword());
-        putSFTPRunner.setProperty(SFTPTransfer.STRICT_HOST_KEY_CHECKING, "false");
-        putSFTPRunner.setProperty(SFTPTransfer.BATCH_SIZE, "2");
-        putSFTPRunner.setProperty(SFTPTransfer.REMOTE_PATH, "nifi_test/");
-        putSFTPRunner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, "true");
-        putSFTPRunner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REPLACE);
-        putSFTPRunner.setProperty(SFTPTransfer.CREATE_DIRECTORY, "true");
-        putSFTPRunner.setProperty(SFTPTransfer.DATA_TIMEOUT, "30 sec");
-        putSFTPRunner.setValidateExpressionUsage(false);
+        final Path fileSystemPath = Paths.get(sshTestServer.getVirtualFileSystemPath());
+        FileUtils.deleteQuietly(fileSystemPath.toFile());
     }
 
     @Test
-    public void testPutSFTPFile() throws IOException {
-        emptyTestDirectory();
+    void testRunNewDirectory() {
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
 
-        Map<String,String> attributes = new HashMap<>();
-        attributes.put("filename", "testfile.txt");
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
 
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
-
-        //verify directory exists
-        Path newDirectory = Paths.get(sshTestServer.getVirtualFileSystemPath() + "nifi_test/");
-        Path newFile = Paths.get(sshTestServer.getVirtualFileSystemPath() + "nifi_test/testfile.txt");
-        Assert.assertTrue("New directory not created.", newDirectory.toAbsolutePath().toFile().exists());
-        Assert.assertTrue("New File not created.", newFile.toAbsolutePath().toFile().exists());
-        putSFTPRunner.clearTransferState();
+        Path newDirectory = Paths.get(sshTestServer.getVirtualFileSystemPath() + REMOTE_DIRECTORY);
+        Path newFile = Paths.get(sshTestServer.getVirtualFileSystemPath() + REMOTE_DIRECTORY + FIRST_FILENAME);
+        assertTrue(newDirectory.toAbsolutePath().toFile().exists(), "New Directory not created");
+        assertTrue(newFile.toAbsolutePath().toFile().exists(), "New File not created");
+        runner.clearTransferState();
     }
 
     @Test
-    public void testPutSFTPFileZeroByte() throws IOException {
-        emptyTestDirectory();
+    void testRunZeroByteFileRejected() {
+        runner.enqueue(ZERO_BYTES, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
 
-        Map<String,String> attributes = new HashMap<>();
-        attributes.put("filename", "testfile.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile1.txt");
-        putSFTPRunner.enqueue("", attributes);
-
-        putSFTPRunner.run();
-
-        //Two files in batch, should have only 1 transferred to sucess, 1 to failure
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 1);
-        putSFTPRunner.clearTransferState();
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile1.txt");
-        putSFTPRunner.enqueue("", attributes);
-
-        putSFTPRunner.run();
-
-        //One files in batch, should have 0 transferred to output since it's zero byte
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 1);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
-        putSFTPRunner.clearTransferState();
-
-        //allow zero byte files
-        putSFTPRunner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, "false");
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile1.txt");
-        putSFTPRunner.enqueue("", attributes);
-
-        putSFTPRunner.run();
-
-        //should have 1 transferred to sucess
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
-
-        //revert settings
-        putSFTPRunner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, "true");
-        putSFTPRunner.clearTransferState();
+        runner.assertTransferCount(PutSFTP.REL_REJECT, 1);
     }
 
     @Test
-    public void testPutSFTPFileConflictResolution() throws IOException {
-        emptyTestDirectory();
+    void testRunZeroByteFileAllowed() {
+        runner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, Boolean.FALSE.toString());
+        runner.enqueue(ZERO_BYTES, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
 
-        //Try transferring file with the same name as a directory, should fail in all cases
-        // except RESOLUTION of NONE
-        Path dir = Paths.get(sshTestServer.getVirtualFileSystemPath() + "nifi_test" );
-        Path dir2 = Paths.get(sshTestServer.getVirtualFileSystemPath() + "nifi_test/testfile" );
-        Files.createDirectory(dir);
-        Files.createDirectory(dir2);
-
-        Map<String,String> attributes = new HashMap<>();
-        attributes.put("filename", "testfile");
-
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_FAILURE, 1);
-
-        //Prepare by uploading test file
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile.txt");
-
-        putSFTPRunner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REPLACE);
-
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-        putSFTPRunner.clearTransferState();
-
-        //set conflict resolution mode to REJECT
-        putSFTPRunner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REJECT);
-
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 1);
-        putSFTPRunner.clearTransferState();
-
-        //set conflict resolution mode to IGNORE
-        putSFTPRunner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_IGNORE);
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 0);
-
-        putSFTPRunner.clearTransferState();
-
-        //set conflict resolution mode to FAIL
-        putSFTPRunner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_FAIL);
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 0);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_FAILURE, 1);
-
-        putSFTPRunner.clearTransferState();
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
     }
 
     @Test
-    public void testPutSFTPBatching() throws IOException {
-        emptyTestDirectory();
+    void testRunConflictResolutionReplaceStrategy() throws IOException {
+        createRemoteFile();
 
-        Map<String,String> attributes = new HashMap<>();
-        attributes.put("filename", "testfile.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
+        runner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REPLACE);
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
 
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile2.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile3.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile4.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile5.txt");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-
-        putSFTPRunner.run();
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 2);
-
-        putSFTPRunner.clearTransferState();
-
-        putSFTPRunner.run();
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 2);
-
-        putSFTPRunner.clearTransferState();
-
-        putSFTPRunner.run();
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
-        putSFTPRunner.clearTransferState();
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
+        runner.assertTransferCount(PutSFTP.REL_REJECT, 0);
+        runner.assertTransferCount(PutSFTP.REL_FAILURE, 0);
     }
 
     @Test
-    public void testPutSFTPProvenanceTransitUri() throws IOException {
-        emptyTestDirectory();
+    void testRunConflictResolutionRejectStrategy() throws IOException {
+        createRemoteFile();
 
-        putSFTPRunner.setProperty(SFTPTransfer.REJECT_ZERO_BYTE, "false");
-        Map<String,String> attributes = new HashMap<>();
-        attributes.put("filename", "testfile.txt");
-        attributes.put("transfer-host","localhost");
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
+        runner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_REJECT);
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
 
-        attributes = new HashMap<>();
-        attributes.put("filename", "testfile1.txt");
-        attributes.put("transfer-host","127.0.0.1");
-
-        putSFTPRunner.enqueue(Paths.get(testFile), attributes);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 2);
-        putSFTPRunner.getProvenanceEvents().forEach(k->{
-            assert(k.getTransitUri().contains("sftp://localhost"));
-        });
-        //Two files in batch, should have 2 transferred to success, 0 to failure
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 2);
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_REJECT, 0);
-
-        MockFlowFile flowFile1 = putSFTPRunner.getFlowFilesForRelationship(PutFileTransfer.REL_SUCCESS).get(0);
-        MockFlowFile flowFile2 = putSFTPRunner.getFlowFilesForRelationship(PutFileTransfer.REL_SUCCESS).get(1);
-        putSFTPRunner.clearProvenanceEvents();
-        putSFTPRunner.clearTransferState();
-
-        //Test different destinations on flow file attributes
-        putSFTPRunner.setProperty(SFTPTransfer.HOSTNAME,"${transfer-host}"); //set to derive hostname
-
-        putSFTPRunner.setThreadCount(1);
-        putSFTPRunner.enqueue(flowFile1);
-        putSFTPRunner.enqueue(flowFile2);
-        putSFTPRunner.run();
-
-        putSFTPRunner.assertTransferCount(PutSFTP.REL_SUCCESS, 2);
-        assert(putSFTPRunner.getProvenanceEvents().get(0).getTransitUri().contains("sftp://localhost"));
-        assert(putSFTPRunner.getProvenanceEvents().get(1).getTransitUri().contains("sftp://127.0.0.1"));
-
-        putSFTPRunner.clearProvenanceEvents();
-        putSFTPRunner.clearTransferState();
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
+        runner.assertTransferCount(PutSFTP.REL_REJECT, 1);
+        runner.assertTransferCount(PutSFTP.REL_FAILURE, 0);
     }
 
-    private void emptyTestDirectory() throws IOException {
-        //Delete Virtual File System folder
-        Path dir = Paths.get(sshTestServer.getVirtualFileSystemPath());
-        FileUtils.cleanDirectory(dir.toFile());
+    @Test
+    void testRunConflictResolutionIgnoreStrategy() throws IOException {
+        createRemoteFile();
+
+        runner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_IGNORE);
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
+
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
+        runner.assertTransferCount(PutSFTP.REL_REJECT, 0);
+        runner.assertTransferCount(PutSFTP.REL_FAILURE, 0);
     }
 
+    @Test
+    void testRunConflictResolutionFailStrategy() throws IOException {
+        createRemoteFile();
+
+        runner.setProperty(SFTPTransfer.CONFLICT_RESOLUTION, FileTransfer.CONFLICT_RESOLUTION_FAIL);
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+        runner.run();
+
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 0);
+        runner.assertTransferCount(PutSFTP.REL_REJECT, 0);
+        runner.assertTransferCount(PutSFTP.REL_FAILURE, 1);
+    }
+
+    @Test
+    void testRunBatching() {
+        final int files = 4;
+        for (int fileNumber = 1; fileNumber <= files; fileNumber++) {
+            final String filename = Integer.toString(fileNumber);
+            runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), filename));
+        }
+
+        runner.run();
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, BATCH_SIZE);
+        runner.clearTransferState();
+
+        runner.run();
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, BATCH_SIZE);
+        runner.assertQueueEmpty();
+    }
+
+    @Test
+    void testRunTransitUri() {
+        runner.enqueue(FLOW_FILE_CONTENTS, Collections.singletonMap(CoreAttributes.FILENAME.key(), FIRST_FILENAME));
+
+        runner.run();
+
+        runner.assertTransferCount(PutSFTP.REL_SUCCESS, 1);
+
+        final List<ProvenanceEventRecord> records = runner.getProvenanceEvents();
+        assertFalse(records.isEmpty());
+
+        final ProvenanceEventRecord record = records.iterator().next();
+        final String firstTransitUri = String.format(TRANSIT_URI_FORMAT, LOCALHOST);
+        assertTrue(record.getTransitUri().startsWith(firstTransitUri), "Transit URI not found");
+    }
+
+    private void createRemoteFile() throws IOException {
+        final Path directory = Paths.get(sshTestServer.getVirtualFileSystemPath() + REMOTE_DIRECTORY);
+        final Path subDirectory = Paths.get(directory.toString(), FIRST_FILENAME);
+        Files.createDirectory(directory);
+        Files.createFile(subDirectory);
+    }
 }

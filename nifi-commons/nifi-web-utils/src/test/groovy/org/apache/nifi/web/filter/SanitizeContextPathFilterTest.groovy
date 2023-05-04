@@ -16,39 +16,15 @@
  */
 package org.apache.nifi.web.filter
 
-import org.junit.After
-import org.junit.Before
-import org.junit.BeforeClass
-import org.junit.Test
-import org.junit.runner.RunWith
-import org.junit.runners.JUnit4
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
+import org.junit.jupiter.api.Test
 
 import javax.servlet.FilterConfig
 import javax.servlet.ServletContext
 import javax.servlet.http.HttpServletRequest
 
-@RunWith(JUnit4.class)
-class SanitizeContextPathFilterTest extends GroovyTestCase {
-    private static final Logger logger = LoggerFactory.getLogger(SanitizeContextPathFilterTest.class)
+import static org.junit.jupiter.api.Assertions.assertEquals
 
-    @BeforeClass
-    static void setUpOnce() throws Exception {
-        logger.metaClass.methodMissing = { String name, args ->
-            logger.info("[${name?.toUpperCase()}] ${(args as List).join(" ")}")
-        }
-    }
-
-    @Before
-    void setUp() throws Exception {
-
-    }
-
-    @After
-    void tearDown() throws Exception {
-
-    }
+class SanitizeContextPathFilterTest {
 
     private static String getValue(String parameterName, Map<String, String> params = [:]) {
         params.containsKey(parameterName) ? params[parameterName] : ""
@@ -69,10 +45,9 @@ class SanitizeContextPathFilterTest extends GroovyTestCase {
 
         // Act
         scpf.init(mockFilterConfig)
-        logger.info("Allowed context paths: ${scpf.getAllowedContextPaths()}")
 
         // Assert
-        assert scpf.getAllowedContextPaths() == EXPECTED_ALLOWED_CONTEXT_PATHS
+        assertEquals(EXPECTED_ALLOWED_CONTEXT_PATHS, scpf.getAllowedContextPaths())
     }
 
     @Test
@@ -89,10 +64,9 @@ class SanitizeContextPathFilterTest extends GroovyTestCase {
 
         // Act
         scpf.init(mockFilterConfig)
-        logger.info("Allowed context paths: ${scpf.getAllowedContextPaths()}")
 
         // Assert
-        assert scpf.getAllowedContextPaths() == EXPECTED_ALLOWED_CONTEXT_PATHS
+        assertEquals(EXPECTED_ALLOWED_CONTEXT_PATHS, scpf.getAllowedContextPaths())
     }
 
     @Test
@@ -131,18 +105,16 @@ class SanitizeContextPathFilterTest extends GroovyTestCase {
                 getHeader           : { String headerName -> getValue(headerName, HEADERS) },
                 setAttribute        : { String attr, String value ->
                     requestAttributes[attr] = value
-                    logger.mock("Set request attribute ${attr} to ${value}")
                 },
         ] as HttpServletRequest
 
         SanitizeContextPathFilter scpf = new SanitizeContextPathFilter()
         scpf.init(mockFilterConfig)
-        logger.info("Allowed context paths: ${scpf.getAllowedContextPaths()}")
 
         // Act
         scpf.injectContextPathAttribute(mockRequest)
 
         // Assert
-        assert requestAttributes["contextPath"] == EXPECTED_CONTEXT_PATH
+        assertEquals(EXPECTED_CONTEXT_PATH, requestAttributes["contextPath"])
     }
 }

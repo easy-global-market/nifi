@@ -19,17 +19,45 @@
     <parent>
         <groupId>org.apache.nifi</groupId>
         <artifactId>nifi-nar-bundles</artifactId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
 
-    <groupId>org.apache.nifi</groupId>
     <artifactId>nifi-smb-bundle</artifactId>
-    <version>1.16.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
+        <module>nifi-smb-client-api</module>
+        <module>nifi-smb-client-api-nar</module>
+        <module>nifi-smb-smbj-client</module>
+        <module>nifi-smb-smbj-client-nar</module>
         <module>nifi-smb-processors</module>
         <module>nifi-smb-nar</module>
+        <module>nifi-smb-smbj-common</module>
     </modules>
 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.hierynomus</groupId>
+                <artifactId>smbj</artifactId>
+                <version>0.11.5</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.bouncycastle</groupId>
+                        <artifactId>bcprov-jdk15on</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>net.engio</groupId>
+                <artifactId>mbassador</artifactId>
+                <version>1.3.2</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.nifi</groupId>
+                <artifactId>nifi-mock</artifactId>
+                <version>1.21.0</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 </project>

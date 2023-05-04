@@ -26,31 +26,26 @@ import org.apache.nifi.processor.Processor;
 import org.apache.nifi.remote.io.socket.NetworkUtils;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Verify basic functionality of {@link DistributedMapCacheClientService}.
- * <p>
- * This test instantiates both the server and client {@link org.apache.nifi.controller.ControllerService} objects
- * implementing the distributed cache protocol.  It assumes that the default distributed cache port (4557)
- * is available.
- */
+@Timeout(5)
 public class DistributedMapCacheTest {
 
     private static TestRunner runner = null;
@@ -59,8 +54,8 @@ public class DistributedMapCacheTest {
     private static final Serializer<String> serializer = new StringSerializer();
     private static final Deserializer<String> deserializer = new StringDeserializer();
 
-    @BeforeClass
-    public static void beforeClass() throws Exception {
+    @BeforeAll
+    public static void startServices() throws Exception {
         final String port = Integer.toString(NetworkUtils.getAvailableTcpPort());
         runner = TestRunners.newTestRunner(Mockito.mock(Processor.class));
 
@@ -76,8 +71,8 @@ public class DistributedMapCacheTest {
         runner.enableControllerService(client);
     }
 
-    @AfterClass
-    public static void afterClass() {
+    @AfterAll
+    public static void shutdownServices() {
         runner.disableControllerService(client);
         runner.removeControllerService(client);
 
@@ -154,7 +149,7 @@ public class DistributedMapCacheTest {
         for (int i = 0; (i < 3); ++i) {
             client.put(key + i, value + i, serializer, serializer);
         }
-        final Set<String> keys = new HashSet<>(Arrays.asList("keySubMap0", "keySubMap1", "keySubMap2"));
+        final Set<String> keys = new LinkedHashSet<>(Arrays.asList("keySubMap0", "keySubMap1", "keySubMap2"));
         final Map<String, String> subMap = client.subMap(keys, serializer, deserializer);
         assertEquals(3, subMap.size());
         for (int i = 0; (i < 3); ++i) {

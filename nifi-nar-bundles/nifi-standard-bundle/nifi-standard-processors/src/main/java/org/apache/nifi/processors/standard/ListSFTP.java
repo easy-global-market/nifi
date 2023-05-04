@@ -24,6 +24,7 @@ import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
+import org.apache.nifi.annotation.configuration.DefaultSchedule;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -48,6 +49,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import org.apache.nifi.scheduling.SchedulingStrategy;
 
 @PrimaryNodeOnly
 @TriggerSerially
@@ -68,11 +70,13 @@ import java.util.stream.Collectors;
                   "last modified as 'yyyy-MM-dd'T'HH:mm:ssZ'"),
     @WritesAttribute(attribute = "filename", description = "The name of the file on the SFTP Server"),
     @WritesAttribute(attribute = "path", description = "The fully qualified name of the directory on the SFTP Server from which the file was pulled"),
+    @WritesAttribute(attribute = "mime.type", description = "The MIME Type that is provided by the configured Record Writer"),
 })
 @Stateful(scopes = {Scope.CLUSTER}, description = "After performing a listing of files, the timestamp of the newest file is stored. "
     + "This allows the Processor to list only files that have been added or modified after "
     + "this date the next time that the Processor is run. State is stored across the cluster so that this Processor can be run on Primary Node only and if "
     + "a new Primary Node is selected, the new node will not duplicate the data that was listed by the previous Primary Node.")
+@DefaultSchedule(strategy = SchedulingStrategy.TIMER_DRIVEN, period = "1 min")
 public class ListSFTP extends ListFileTransfer {
 
     private volatile Predicate<FileInfo> fileFilter;

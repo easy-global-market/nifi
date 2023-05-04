@@ -16,7 +16,7 @@
 --%>
 <%@ page contentType="text/html" pageEncoding="UTF-8" session="false" %>
 <!DOCTYPE html>
-<html>
+<html lang="en">
     <head>
         <title>NiFi Logout</title>
         <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
@@ -40,13 +40,16 @@
         ${nf.logout.script.tags}
     </head>
     <body class="logout-body">
-    <div id="logout-user-links-container">
-        <ul id="logout-user-links" class="links">
-            <li>
-                <span id="user-home" class="link">home</span>
-            </li>
-        </ul>
-    </div>
+        <div id="logout-user-links-container">
+            <ul id="logout-user-links" class="links">
+                <li id="user-login-container" style="display: none;">
+                    <span id="user-login" class="link">log in</span>
+                </li>
+                <li>
+                    <span id="user-home" class="link">home</span>
+                </li>
+            </ul>
+        </div>
         <div id="logout-contents-container">
             <jsp:include page="/WEB-INF/partials/logout/logout-message.jsp"/>
         </div>

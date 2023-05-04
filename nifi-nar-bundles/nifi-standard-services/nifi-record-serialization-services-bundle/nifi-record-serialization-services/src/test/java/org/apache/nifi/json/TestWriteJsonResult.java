@@ -19,8 +19,9 @@ package org.apache.nifi.json;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.record.NullSuppression;
+import org.apache.nifi.NullSuppression;
 import org.apache.nifi.schema.access.SchemaNameAsAttribute;
+import org.apache.nifi.schema.inference.TimeValueInference;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.MapRecord;
@@ -33,6 +34,7 @@ import org.apache.nifi.serialization.record.SerializedForm;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -54,10 +56,10 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class TestWriteJsonResult {
+class TestWriteJsonResult {
 
     @Test
-    public void testDataTypes() throws IOException, ParseException {
+    void testDataTypes() throws IOException, ParseException {
         final List<RecordField> fields = new ArrayList<>();
         for (final RecordFieldType fieldType : RecordFieldType.values()) {
             if (fieldType == RecordFieldType.CHOICE) {
@@ -102,6 +104,7 @@ public class TestWriteJsonResult {
         valueMap.put("enum", null);
         valueMap.put("choice", 48L);
         valueMap.put("map", map);
+        valueMap.put("uuid", "8bb20bf2-ec41-4b94-80a4-922f4dba009c");
 
         final Record record = new MapRecord(schema, valueMap);
         final RecordSet rs = RecordSet.of(schema, record);
@@ -121,7 +124,7 @@ public class TestWriteJsonResult {
 
 
     @Test
-    public void testWriteSerializedForm() throws IOException {
+    void testWriteSerializedForm() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("age", RecordFieldType.INT.getDataType()));
@@ -160,7 +163,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testTimestampWithNullFormat() throws IOException {
+    void testTimestampWithNullFormat() throws IOException {
         final Map<String, Object> values = new HashMap<>();
         values.put("timestamp", new java.sql.Timestamp(37293723L));
         values.put("time", new java.sql.Time(37293723L));
@@ -192,7 +195,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testExtraFieldInWriteRecord() throws IOException {
+    void testExtraFieldInWriteRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         final RecordSchema schema = new SimpleRecordSchema(fields);
@@ -219,7 +222,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testExtraFieldInWriteRawRecord() throws IOException {
+    void testExtraFieldInWriteRawRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         final RecordSchema schema = new SimpleRecordSchema(fields);
@@ -246,7 +249,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testMissingFieldInWriteRecord() throws IOException {
+    void testMissingFieldInWriteRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
@@ -273,7 +276,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testMissingFieldInWriteRawRecord() throws IOException {
+    void testMissingFieldInWriteRawRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
@@ -300,7 +303,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testMissingAndExtraFieldInWriteRecord() throws IOException {
+    void testMissingAndExtraFieldInWriteRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
@@ -328,7 +331,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testMissingAndExtraFieldInWriteRawRecord() throws IOException {
+    void testMissingAndExtraFieldInWriteRawRecord() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
@@ -356,7 +359,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testNullSuppression() throws IOException {
+    void testNullSuppression() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("id", RecordFieldType.STRING.getDataType()));
         fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
@@ -378,8 +381,8 @@ public class TestWriteJsonResult {
 
         baos.reset();
         try (
-            final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
-                    NullSuppression.ALWAYS_SUPPRESS, OutputGrouping.OUTPUT_ARRAY, null, null, null)) {
+                final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
+                        NullSuppression.ALWAYS_SUPPRESS, OutputGrouping.OUTPUT_ARRAY, null, null, null)) {
             writer.beginRecordSet();
             writer.write(recordWithMissingName);
             writer.finishRecordSet();
@@ -390,7 +393,7 @@ public class TestWriteJsonResult {
         baos.reset();
         try (final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
                 NullSuppression.SUPPRESS_MISSING, OutputGrouping.OUTPUT_ARRAY, null, null,
-            null)) {
+                null)) {
             writer.beginRecordSet();
             writer.write(recordWithMissingName);
             writer.finishRecordSet();
@@ -414,8 +417,8 @@ public class TestWriteJsonResult {
 
         baos.reset();
         try (
-            final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
-                    NullSuppression.ALWAYS_SUPPRESS, OutputGrouping.OUTPUT_ARRAY, null, null, null)) {
+                final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
+                        NullSuppression.ALWAYS_SUPPRESS, OutputGrouping.OUTPUT_ARRAY, null, null, null)) {
             writer.beginRecordSet();
             writer.write(recordWithNullValue);
             writer.finishRecordSet();
@@ -426,7 +429,7 @@ public class TestWriteJsonResult {
         baos.reset();
         try (final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
                 NullSuppression.SUPPRESS_MISSING, OutputGrouping.OUTPUT_ARRAY, null, null,
-            null)) {
+                null)) {
             writer.beginRecordSet();
             writer.write(recordWithNullValue);
             writer.finishRecordSet();
@@ -437,7 +440,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testOnelineOutput() throws IOException {
+    void testOnelineOutput() throws IOException {
         final Map<String, Object> values1 = new HashMap<>();
         values1.put("timestamp", new java.sql.Timestamp(37293723L));
         values1.put("time", new java.sql.Time(37293723L));
@@ -480,7 +483,7 @@ public class TestWriteJsonResult {
     }
 
     @Test
-    public void testChoiceArray() throws IOException {
+    void testChoiceArray() throws IOException {
         final List<RecordField> fields = new ArrayList<>();
         fields.add(new RecordField("path", RecordFieldType.CHOICE.getChoiceDataType(RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType()))));
         final RecordSchema schema = new SimpleRecordSchema(fields);
@@ -506,5 +509,49 @@ public class TestWriteJsonResult {
 
         final String output = new String(data, StandardCharsets.UTF_8);
         assertEquals(expected, output);
+    }
+
+    @Test
+    void testChoiceArrayOfStringsOrArrayOfRecords() throws IOException {
+        final String jsonFirstItem = "{\"itemData\":[\"test\"]}";
+        final String jsonSecondItem = "{\"itemData\":[{\"quantity\":10}]}";
+        final String json = String.format("[{\"items\":[%s,%s]}]", jsonFirstItem, jsonSecondItem);
+
+        final JsonSchemaInference jsonSchemaInference = new JsonSchemaInference(new TimeValueInference(null, null, null));
+        final RecordSchema schema = jsonSchemaInference.inferSchema(new JsonRecordSource(new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8))));
+
+        final Map<String, Object> itemData1 = new HashMap<>();
+        itemData1.put("itemData", new String[]{"test"});
+
+        final Map<String, Object> quantityMap = new HashMap<>();
+        quantityMap.put("quantity", 10);
+        final List<RecordField> itemDataRecordFields = new ArrayList<>(1);
+        itemDataRecordFields.add(new RecordField("quantity", RecordFieldType.INT.getDataType(), true));
+        final RecordSchema quantityRecordSchema = new SimpleRecordSchema(itemDataRecordFields);
+        final Record quantityRecord = new MapRecord(quantityRecordSchema, quantityMap);
+
+        final Record[] quantityRecordArray = {quantityRecord};
+        final Map<String, Object> itemData2 = new HashMap<>();
+
+        itemData2.put("itemData", quantityRecordArray);
+
+        final Object[] itemDataArray = {itemData1, itemData2};
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("items", itemDataArray);
+        Record topLevelRecord = new MapRecord(schema, values);
+
+        final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (final WriteJsonResult writer = new WriteJsonResult(Mockito.mock(ComponentLog.class), schema, new SchemaNameAsAttribute(), baos, false,
+                NullSuppression.NEVER_SUPPRESS, OutputGrouping.OUTPUT_ARRAY, null, null, null)) {
+            writer.beginRecordSet();
+            writer.writeRecord(topLevelRecord);
+            writer.finishRecordSet();
+        }
+
+        final byte[] data = baos.toByteArray();
+
+        final String output = new String(data, StandardCharsets.UTF_8);
+        assertEquals(json, output);
     }
 }

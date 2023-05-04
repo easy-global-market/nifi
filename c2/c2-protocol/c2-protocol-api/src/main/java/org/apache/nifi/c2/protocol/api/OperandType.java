@@ -26,12 +26,18 @@ public enum OperandType {
     CONNECTION,
     DEBUG,
     MANIFEST,
-    REPOSITORY;
+    REPOSITORY,
+    PROPERTIES,
+    ASSET;
 
     public static Optional<OperandType> fromString(String value) {
         return Arrays.stream(values())
             .filter(operandType -> operandType.name().equalsIgnoreCase(value))
             .findAny();
     }
-}
 
+    @Override
+    public String toString() {
+        return super.toString().toLowerCase();
+    }
+}

@@ -37,9 +37,20 @@ public class ExtensionComponent extends DefinedType {
     private List<DefinedType> providedApiImplementations;
 
     private Set<String> tags;
+    private Set<String> seeAlso;
 
     private Boolean deprecated;
     private String deprecationReason;
+    private Set<String> deprecationAlternatives;
+
+    private Boolean restricted;
+    private String restrictedExplanation;
+    private Set<Restriction> explicitRestrictions;
+
+    private Stateful stateful;
+    private List<SystemResourceConsideration> systemResourceConsiderations;
+
+    private boolean additionalDetails;
 
     @ApiModelProperty("The build metadata for this component")
     public BuildInfo getBuildInfo() {
@@ -69,6 +80,15 @@ public class ExtensionComponent extends DefinedType {
         this.tags = tags;
     }
 
+    @ApiModelProperty("The names of other component types that may be related")
+    public Set<String> getSeeAlso() {
+        return seeAlso;
+    }
+
+    public void setSeeAlso(Set<String> seeAlso) {
+        this.seeAlso = seeAlso;
+    }
+
     @ApiModelProperty("Whether or not the component has been deprecated")
     public Boolean getDeprecated() {
         return deprecated;
@@ -85,6 +105,73 @@ public class ExtensionComponent extends DefinedType {
 
     public void setDeprecationReason(String deprecationReason) {
         this.deprecationReason = deprecationReason;
+    }
+
+    @ApiModelProperty("If this component has been deprecated, this optional field provides alternatives to use")
+    public Set<String> getDeprecationAlternatives() {
+        return deprecationAlternatives;
+    }
+
+    public void setDeprecationAlternatives(Set<String> deprecationAlternatives) {
+        this.deprecationAlternatives = deprecationAlternatives;
+    }
+
+    @ApiModelProperty("Whether or not the component has a general restriction")
+    public Boolean isRestricted() {
+        return restricted;
+    }
+
+    public Boolean getRestricted() {
+        return restricted;
+    }
+
+    public void setRestricted(Boolean restricted) {
+        this.restricted = restricted;
+    }
+
+    @ApiModelProperty("An optional description of the general restriction")
+    public String getRestrictedExplanation() {
+        return restrictedExplanation;
+    }
+
+    public void setRestrictedExplanation(String restrictedExplanation) {
+        this.restrictedExplanation = restrictedExplanation;
+    }
+
+    @ApiModelProperty("Explicit restrictions that indicate a require permission to use the component")
+    public Set<Restriction> getExplicitRestrictions() {
+        return explicitRestrictions;
+    }
+
+    public void setExplicitRestrictions(Set<Restriction> explicitRestrictions) {
+        this.explicitRestrictions = explicitRestrictions;
+    }
+
+    @ApiModelProperty("Indicates if the component stores state")
+    public Stateful getStateful() {
+        return stateful;
+    }
+
+    public void setStateful(Stateful stateful) {
+        this.stateful = stateful;
+    }
+
+    @ApiModelProperty("The system resource considerations for the given component")
+    public List<SystemResourceConsideration> getSystemResourceConsiderations() {
+        return systemResourceConsiderations;
+    }
+
+    public void setSystemResourceConsiderations(List<SystemResourceConsideration> systemResourceConsiderations) {
+        this.systemResourceConsiderations = systemResourceConsiderations;
+    }
+
+    @ApiModelProperty("Indicates if the component has additional details documentation")
+    public boolean isAdditionalDetails() {
+        return additionalDetails;
+    }
+
+    public void setAdditionalDetails(boolean additionalDetails) {
+        this.additionalDetails = additionalDetails;
     }
 
     @Override

@@ -17,14 +17,9 @@
 
 package org.apache.nifi.minifi.bootstrap.configuration.differentiators;
 
-import okhttp3.Request;
-import org.apache.commons.io.FileUtils;
-import org.apache.nifi.minifi.bootstrap.ConfigurationFileHolder;
-import org.apache.nifi.minifi.bootstrap.configuration.differentiators.interfaces.Differentiator;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.mockito.Mockito;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -32,12 +27,13 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.when;
+import okhttp3.Request;
+import org.apache.commons.io.FileUtils;
+import org.apache.nifi.minifi.bootstrap.ConfigurationFileHolder;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 public class WholeConfigDifferentiatorTest {
 
@@ -46,13 +42,12 @@ public class WholeConfigDifferentiatorTest {
 
     public static ByteBuffer defaultConfigBuffer;
     public static ByteBuffer newConfigBuffer;
-    public static Properties properties = new Properties();
     public static ConfigurationFileHolder configurationFileHolder;
 
     public static Request dummyRequest;
 
-    @BeforeClass
-    public static void beforeClass() throws IOException {
+    @BeforeAll
+    public static void setConfiguration() throws IOException {
         dummyRequest = new Request.Builder()
                 .get()
                 .url("https://nifi.apache.org/index.html")
@@ -66,16 +61,12 @@ public class WholeConfigDifferentiatorTest {
         when(configurationFileHolder.getConfigFileReference()).thenReturn(new AtomicReference<>(defaultConfigBuffer));
     }
 
-    @Before
-    public void beforeEach() {
-    }
-
     // InputStream differentiator methods
 
     @Test
     public void TestSameInputStream() throws IOException {
         Differentiator<InputStream> differentiator = WholeConfigDifferentiator.getInputStreamDifferentiator();
-        differentiator.initialize(properties, configurationFileHolder);
+        differentiator.initialize(configurationFileHolder);
 
         FileInputStream fileInputStream = new FileInputStream(defaultConfigPath.toFile());
         assertFalse(differentiator.isNew(fileInputStream));
@@ -84,7 +75,7 @@ public class WholeConfigDifferentiatorTest {
     @Test
     public void TestNewInputStream() throws IOException {
         Differentiator<InputStream> differentiator = WholeConfigDifferentiator.getInputStreamDifferentiator();
-        differentiator.initialize(properties, configurationFileHolder);
+        differentiator.initialize(configurationFileHolder);
 
         FileInputStream fileInputStream = new FileInputStream(newConfigPath.toFile());
         assertTrue(differentiator.isNew(fileInputStream));
@@ -95,7 +86,7 @@ public class WholeConfigDifferentiatorTest {
     @Test
     public void TestSameByteBuffer() throws IOException {
         Differentiator<ByteBuffer> differentiator = WholeConfigDifferentiator.getByteBufferDifferentiator();
-        differentiator.initialize(properties, configurationFileHolder);
+        differentiator.initialize(configurationFileHolder);
 
         assertFalse(differentiator.isNew(defaultConfigBuffer));
     }
@@ -103,7 +94,7 @@ public class WholeConfigDifferentiatorTest {
     @Test
     public void TestNewByteBuffer() throws IOException {
         Differentiator<ByteBuffer> differentiator = WholeConfigDifferentiator.getByteBufferDifferentiator();
-        differentiator.initialize(properties, configurationFileHolder);
+        differentiator.initialize(configurationFileHolder);
 
         assertTrue(differentiator.isNew(newConfigBuffer));
     }

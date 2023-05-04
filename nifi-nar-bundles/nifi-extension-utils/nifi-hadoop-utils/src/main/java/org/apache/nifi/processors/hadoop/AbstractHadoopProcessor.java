@@ -158,6 +158,7 @@ public abstract class AbstractHadoopProcessor extends AbstractProcessor implemen
 
 
     public static final String ABSOLUTE_HDFS_PATH_ATTRIBUTE = "absolute.hdfs.path";
+    public static final String HADOOP_FILE_URL_ATTRIBUTE = "hadoop.file.url";
 
     protected static final String TARGET_HDFS_DIR_CREATED_ATTRIBUTE = "target.dir.created";
 
@@ -696,7 +697,7 @@ public abstract class AbstractHadoopProcessor extends AbstractProcessor implemen
         final String path;
 
         if (uri.getScheme() != null) {
-            if (!uri.getScheme().equals(fileSystemUri.getScheme()) || !uri.getAuthority().equals(fileSystemUri.getAuthority())) {
+            if (!uri.getScheme().equals(fileSystemUri.getScheme()) || (uri.getAuthority() != null && !uri.getAuthority().equals(fileSystemUri.getAuthority()))) {
                 if (propertyName.isPresent()) {
                     getLogger().warn(NORMALIZE_ERROR_WITH_PROPERTY, propertyName, uri, fileSystemUri);
                 } else {

@@ -19,6 +19,7 @@ package org.apache.nifi.controller.scheduling;
 
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnShutdown;
+import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.components.validation.ValidationStatus;
 import org.apache.nifi.connectable.Connectable;
 import org.apache.nifi.connectable.Funnel;
@@ -245,7 +246,8 @@ public class StatelessProcessScheduler implements ProcessScheduler {
     }
 
     @Override
-    public void unschedule(final ReportingTaskNode taskNode) {
+    public Future<Void> unschedule(final ReportingTaskNode taskNode) {
+        return CompletableFuture.completedFuture(null);
     }
 
     @Override
@@ -314,5 +316,17 @@ public class StatelessProcessScheduler implements ProcessScheduler {
     @Override
     public Future<?> submitFrameworkTask(final Runnable task) {
         return null;
+    }
+
+    @Override
+    public void notifyPrimaryNodeStateChange(final ProcessorNode processor, final PrimaryNodeState primaryNodeState) {
+    }
+
+    @Override
+    public void notifyPrimaryNodeStateChange(final ControllerServiceNode service, final PrimaryNodeState primaryNodeState) {
+    }
+
+    @Override
+    public void notifyPrimaryNodeStateChange(final ReportingTaskNode taskNode, final PrimaryNodeState primaryNodeState) {
     }
 }

@@ -38,6 +38,8 @@ import org.apache.nifi.controller.repository.io.FlowFileAccessOutputStream;
 import org.apache.nifi.controller.repository.io.LimitedInputStream;
 import org.apache.nifi.controller.repository.io.TaskTerminationInputStream;
 import org.apache.nifi.controller.repository.io.TaskTerminationOutputStream;
+import org.apache.nifi.controller.repository.metrics.PerformanceTracker;
+import org.apache.nifi.controller.repository.metrics.PerformanceTrackingInputStream;
 import org.apache.nifi.controller.repository.metrics.StandardFlowFileEvent;
 import org.apache.nifi.controller.state.StandardStateMap;
 import org.apache.nifi.flowfile.FlowFile;
@@ -137,6 +139,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
     private final Map<FlowFile, Path> deleteOnCommit = new HashMap<>();
     private final long sessionId;
     private final String connectableDescription;
+    private final PerformanceTracker performanceTracker;
 
     private Map<String, Long> countersOnCommit;
     private Map<String, Long> immediateCounters;
@@ -180,14 +183,15 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
     private final String retryAttribute;
     private final FlowFileLinkage flowFileLinkage = new FlowFileLinkage();
 
-    public StandardProcessSession(final RepositoryContext context, final TaskTermination taskTermination) {
+    public StandardProcessSession(final RepositoryContext context, final TaskTermination taskTermination, final PerformanceTracker performanceTracker) {
         this.context = context;
         this.taskTermination = taskTermination;
+        this.performanceTracker = performanceTracker;
 
         this.provenanceReporter = context.createProvenanceReporter(this::isFlowFileKnown, this);
         this.sessionId = idGenerator.getAndIncrement();
         this.connectableDescription = context.getConnectableDescription();
-        this.claimCache = context.createContentClaimWriteCache();
+        this.claimCache = context.createContentClaimWriteCache(performanceTracker);
         LOG.trace("Session {} created for {}", this, connectableDescription);
         processingStartTime = System.nanoTime();
         retryAttribute = "retryCount." + context.getConnectable().getIdentifier();
@@ -344,17 +348,22 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                     }
                 }
             } else {
-                final Connection finalDestination = destinations.remove(destinations.size() - 1); // remove last element
-                final FlowFileRecord currRec = record.getCurrent();
-                final StandardFlowFileRecord.Builder builder = new StandardFlowFileRecord.Builder().fromFlowFile(currRec);
-                builder.removeAttributes(retryAttribute);
+                FlowFileRecord currRec = record.getCurrent();
 
+                // If there's a retry attribute present, remove it. The attribute should only live while the FlowFile is being processed by the current component
+                if (currRec.getAttribute(retryAttribute) != null) {
+                    currRec = new StandardFlowFileRecord.Builder().fromFlowFile(currRec).removeAttributes(retryAttribute).build();
+                    record.setWorking(currRec, retryAttribute, null, false);
+                }
+
+                final Connection finalDestination = destinations.remove(destinations.size() - 1); // remove last element
                 record.setDestination(finalDestination.getFlowFileQueue());
-                record.setWorking(builder.build(), false);
                 incrementConnectionInputCounts(finalDestination, record);
 
                 for (final Connection destination : destinations) { // iterate over remaining destinations and "clone" as needed
                     incrementConnectionInputCounts(destination, record);
+
+                    final StandardFlowFileRecord.Builder builder = new StandardFlowFileRecord.Builder().fromFlowFile(currRec);
                     builder.id(context.getNextFlowFileSequence());
 
                     final String newUuid = UUID.randomUUID().toString();
@@ -368,7 +377,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                     if (claim != null) {
                         context.getContentRepository().incrementClaimaintCount(claim);
                     }
-                    newRecord.setWorking(clone, Collections.<String, String>emptyMap(), false);
+                    newRecord.setWorking(clone, Collections.emptyMap(), false);
 
                     newRecord.setDestination(destination.getFlowFileQueue());
                     newRecord.setTransferRelationship(record.getTransferRelationship());
@@ -543,13 +552,9 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
         LOG.debug("Successfully committed session {} for {}", this, connectableDescription);
     }
 
-    private void commit(final boolean asynchronous) {
+    private synchronized void commit(final boolean asynchronous) {
         checkpoint(this.checkpoint != null); // If a checkpoint already exists, we need to copy the collection
         commit(this.checkpoint, asynchronous);
-
-        acknowledgeRecords();
-        resetState();
-
         this.checkpoint = null;
     }
 
@@ -564,6 +569,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
     @SuppressWarnings({"unchecked", "rawtypes"})
     protected void commit(final Checkpoint checkpoint, final boolean asynchronous) {
         try {
+            performanceTracker.beginSessionCommit();
             final long commitStartNanos = System.nanoTime();
 
             resetReadClaim();
@@ -594,7 +600,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             final long flowFileRepoUpdateFinishNanos = System.nanoTime();
             final long flowFileRepoUpdateNanos = flowFileRepoUpdateFinishNanos - flowFileRepoUpdateStart;
 
-            if (LOG.isInfoEnabled()) {
+            if (LOG.isDebugEnabled()) {
                 for (final RepositoryRecord record : checkpoint.records.values()) {
                     if (record.isMarkedForAbort()) {
                         final FlowFileRecord flowFile = record.getCurrent();
@@ -646,7 +652,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             }
             checkpoint.deleteOnCommit.clear();
 
-            if (LOG.isInfoEnabled()) {
+            if (LOG.isDebugEnabled()) {
                 final String sessionSummary = summarizeEvents(checkpoint);
                 if (!sessionSummary.isEmpty()) {
                     LOG.debug("{} for {}, committed the following events: {}", this, connectableDescription, sessionSummary);
@@ -678,38 +684,41 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             // Update local state
             final StateManager stateManager = context.getStateManager();
             if (checkpoint.localState != null) {
-                final StateMap stateMap = stateManager.getState(Scope.LOCAL);
-                if (stateMap.getVersion() < checkpoint.localState.getVersion()) {
-                    LOG.debug("Updating State Manager's Local State");
-
-                    try {
+                try {
+                    final StateMap stateMap = stateManager.getState(Scope.LOCAL);
+                    if (stateMap.getVersion() < checkpoint.localState.getVersion()) {
+                        LOG.debug("Updating State Manager's Local State");
                         stateManager.setState(checkpoint.localState.toMap(), Scope.LOCAL);
-                    } catch (final Exception e) {
-                        LOG.warn("Failed to update Local State for {}. If NiFi is restarted before the state is able to be updated, it could result in data duplication.", connectableDescription, e);
+                    } else {
+                        LOG.debug("Will not update State Manager's Local State because the State Manager reports the latest version as {}, which is newer than the session's known version of {}.",
+                            stateMap.getVersion(), checkpoint.localState.getVersion());
                     }
-                } else {
-                    LOG.debug("Will not update State Manager's Local State because the State Manager reports the latest version as {}, which is newer than the session's known version of {}.",
-                        stateMap.getVersion(), checkpoint.localState.getVersion());
+                } catch (final Exception e) {
+                    LOG.warn("Failed to update Local State for {}. If NiFi is restarted before the state is able to be updated, it could result in data duplication.", connectableDescription, e);
                 }
             }
 
             // Update cluster state
             if (checkpoint.clusterState != null) {
-                final StateMap stateMap = stateManager.getState(Scope.CLUSTER);
-                if (stateMap.getVersion() < checkpoint.clusterState.getVersion()) {
-                    LOG.debug("Updating State Manager's Cluster State");
-
-                    try {
+                try {
+                    final StateMap stateMap = stateManager.getState(Scope.CLUSTER);
+                    if (stateMap.getVersion() < checkpoint.clusterState.getVersion()) {
+                        LOG.debug("Updating State Manager's Cluster State");
                         stateManager.setState(checkpoint.clusterState.toMap(), Scope.CLUSTER);
-                    } catch (final Exception e) {
-                        LOG.warn("Failed to update Cluster State for {}. If NiFi is restarted before the state is able to be updated, it could result in data duplication.", connectableDescription, e);
+                    } else {
+                        LOG.debug("Will not update State Manager's Cluster State because the State Manager reports the latest version as {}, which is newer than the session's known version of {}.",
+                            stateMap.getVersion(), checkpoint.clusterState.getVersion());
                     }
-                } else {
-                    LOG.debug("Will not update State Manager's Cluster State because the State Manager reports the latest version as {}, which is newer than the session's known version of {}.",
-                        stateMap.getVersion(), checkpoint.clusterState.getVersion());
+                } catch (final Exception e) {
+                    LOG.warn("Failed to update Cluster State for {}. If NiFi is restarted before the state is able to be updated, it could result in data duplication.", connectableDescription, e);
                 }
             }
 
+            // Acknowledge records in order to update counts for incoming connections' queues
+            acknowledgeRecords();
+
+            // Reset the internal state, now that the session has been committed
+            resetState();
         } catch (final Exception e) {
             LOG.error("Failed to commit session {}. Will roll back.", this, e);
 
@@ -727,6 +736,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             } else {
                 throw new ProcessException(e);
             }
+        } finally {
+            performanceTracker.endSessionCommit();
         }
     }
 
@@ -1329,11 +1340,11 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             if (repoRecord.getOriginalQueue() != null && repoRecord.getOriginalQueue().getIdentifier() != null) {
                 details.append("queue=")
                         .append(repoRecord.getOriginalQueue().getIdentifier())
-                        .append("/");
+                        .append(", ");
             }
             details.append("filename=")
                     .append(repoRecord.getCurrent().getAttribute(CoreAttributes.FILENAME.key()))
-                    .append("/uuid=")
+                    .append(", uuid=")
                     .append(repoRecord.getCurrent().getAttribute(CoreAttributes.UUID.key()));
         }
         if (records.size() > MAX_ROLLBACK_FLOWFILES_TO_LOG) {
@@ -1341,7 +1352,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                 details.append(", ");
             }
             details.append(records.size() - MAX_ROLLBACK_FLOWFILES_TO_LOG)
-                    .append(" additional Flowfiles not listed");
+                    .append(" additional FlowFiles not listed");
         } else if (filesListed == 0) {
             details.append("none");
         }
@@ -1440,8 +1451,6 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
 
     @Override
     public void migrate(final ProcessSession newOwner, final Collection<FlowFile> flowFiles) {
-        verifyTaskActive();
-
         if (Objects.requireNonNull(newOwner) == this) {
             throw new IllegalArgumentException("Cannot migrate FlowFiles from a Process Session to itself");
         }
@@ -1457,188 +1466,200 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
         migrate((StandardProcessSession) newOwner, flowFiles);
     }
 
-    private void migrate(final StandardProcessSession newOwner, Collection<FlowFile> flowFiles) {
-        // We don't call validateRecordState() here because we want to allow migration of FlowFiles that have already been marked as removed or transferred, etc.
-        flowFiles = flowFiles.stream().map(this::getMostRecent).collect(Collectors.toList());
+    private synchronized void migrate(final StandardProcessSession newOwner, Collection<FlowFile> flowFiles) {
+        // This method will update many member variables/internal state of both `this` and `newOwner`. These member variables may also be updated during
+        // session rollback, such as when a Processor is terminated. As such, we need to ensure that we synchronize on both `this` and `newOwner` so that
+        // neither can be rolled back while we are in the process of migrating FlowFiles from one session to another.
+        //
+        // We must also ensure that we verify that both sessions are in an amenable state to perform this transference after obtaining the synchronization lock.
+        // We synchronize on 'this' by marking the method synchronized. Because the only way in which one Process Session will call into another is via this migrate() method,
+        // we do not need to worry about the order in which the synchronized lock is obtained.
+        synchronized (newOwner) {
+            verifyTaskActive();
+            newOwner.verifyTaskActive();
 
-        for (final FlowFile flowFile : flowFiles) {
-            if (openInputStreams.containsKey(flowFile)) {
-                throw new IllegalStateException(flowFile + " cannot be migrated to a new Process Session because this session currently "
-                    + "has an open InputStream for the FlowFile, created by calling ProcessSession.read(FlowFile)");
-            }
+            // We don't call validateRecordState() here because we want to allow migration of FlowFiles that have already been marked as removed or transferred, etc.
+            flowFiles = flowFiles.stream().map(this::getMostRecent).collect(Collectors.toList());
 
-            if (openOutputStreams.containsKey(flowFile)) {
-                throw new IllegalStateException(flowFile + " cannot be migrated to a new Process Session because this session currently "
-                    + "has an open OutputStream for the FlowFile, created by calling ProcessSession.write(FlowFile)");
-            }
-
-            if (readRecursionSet.containsKey(flowFile)) {
-                throw new IllegalStateException(flowFile + " already in use for an active callback or InputStream created by ProcessSession.read(FlowFile) has not been closed");
-            }
-            if (writeRecursionSet.contains(flowFile)) {
-                throw new IllegalStateException(flowFile + " already in use for an active callback or OutputStream created by ProcessSession.write(FlowFile) has not been closed");
-            }
-
-            final StandardRepositoryRecord record = getRecord(flowFile);
-            if (record == null) {
-                throw new FlowFileHandlingException(flowFile + " is not known in this session (" + toString() + ")");
-            }
-        }
-
-        // If we have a FORK event for one of the given FlowFiles, then all children must also be migrated. Otherwise, we
-        // could have a case where we have FlowFile A transferred and eventually exiting the flow and later the 'newOwner'
-        // ProcessSession is committed, claiming to have created FlowFiles from the parent, which is no longer even in
-        // the flow. This would be very confusing when looking at the provenance for the FlowFile, so it is best to avoid this.
-        final Set<String> flowFileIds = flowFiles.stream()
-            .map(ff -> ff.getAttribute(CoreAttributes.UUID.key()))
-            .collect(Collectors.toSet());
-
-        for (final Map.Entry<FlowFile, ProvenanceEventBuilder> entry : forkEventBuilders.entrySet()) {
-            final FlowFile eventFlowFile = entry.getKey();
-            if (flowFiles.contains(eventFlowFile)) {
-                final ProvenanceEventBuilder eventBuilder = entry.getValue();
-                for (final String childId : eventBuilder.getChildFlowFileIds()) {
-                    if (!flowFileIds.contains(childId)) {
-                        throw new FlowFileHandlingException("Cannot migrate " + eventFlowFile + " to a new session because it was forked to create " + eventBuilder.getChildFlowFileIds().size()
-                            + " children and not all children are being migrated. If any FlowFile is forked, all of its children must also be migrated at the same time as the forked FlowFile");
-                    }
-                }
-            } else {
-                final ProvenanceEventBuilder eventBuilder = entry.getValue();
-                for (final String childId : eventBuilder.getChildFlowFileIds()) {
-                    if (flowFileIds.contains(childId)) {
-                        throw new FlowFileHandlingException("Cannot migrate " + eventFlowFile + " to a new session because it was forked from a Parent FlowFile, but the parent is not being migrated. "
-                            + "If any FlowFile is forked, the parent and all children must be migrated at the same time.");
-                    }
-                }
-            }
-        }
-
-        // If we have a FORK event where a FlowFile is a child of the FORK event, we want to create a FORK
-        // event builder for the new owner of the FlowFile and remove the child from our fork event builder.
-        final Set<FlowFile> forkedFlowFilesMigrated = new HashSet<>();
-        for (final Map.Entry<FlowFile, ProvenanceEventBuilder> entry : forkEventBuilders.entrySet()) {
-            final FlowFile eventFlowFile = entry.getKey();
-            final ProvenanceEventBuilder eventBuilder = entry.getValue();
-
-            // If the FlowFile that the event is attached to is not being migrated, we should not migrate the fork event builder either.
-            if (!flowFiles.contains(eventFlowFile)) {
-                continue;
-            }
-
-            final Set<String> childrenIds = new HashSet<>(eventBuilder.getChildFlowFileIds());
-
-            ProvenanceEventBuilder copy = null;
             for (final FlowFile flowFile : flowFiles) {
-                final String flowFileId = flowFile.getAttribute(CoreAttributes.UUID.key());
-                if (childrenIds.contains(flowFileId)) {
-                    eventBuilder.removeChildFlowFile(flowFile);
+                if (openInputStreams.containsKey(flowFile)) {
+                    throw new IllegalStateException(flowFile + " cannot be migrated to a new Process Session because this session currently "
+                        + "has an open InputStream for the FlowFile, created by calling ProcessSession.read(FlowFile)");
+                }
 
-                    if (copy == null) {
-                        copy = eventBuilder.copy();
-                        copy.getChildFlowFileIds().clear();
-                    }
-                    copy.addChildFlowFile(flowFileId);
+                if (openOutputStreams.containsKey(flowFile)) {
+                    throw new IllegalStateException(flowFile + " cannot be migrated to a new Process Session because this session currently "
+                        + "has an open OutputStream for the FlowFile, created by calling ProcessSession.write(FlowFile)");
+                }
+
+                if (readRecursionSet.containsKey(flowFile)) {
+                    throw new IllegalStateException(flowFile + " already in use for an active callback or InputStream created by ProcessSession.read(FlowFile) has not been closed");
+                }
+                if (writeRecursionSet.contains(flowFile)) {
+                    throw new IllegalStateException(flowFile + " already in use for an active callback or OutputStream created by ProcessSession.write(FlowFile) has not been closed");
+                }
+
+                final StandardRepositoryRecord record = getRecord(flowFile);
+                if (record == null) {
+                    throw new FlowFileHandlingException(flowFile + " is not known in this session (" + toString() + ")");
                 }
             }
 
-            if (copy != null) {
-                newOwner.forkEventBuilders.put(eventFlowFile, copy);
-                forkedFlowFilesMigrated.add(eventFlowFile);
-            }
-        }
+            // If we have a FORK event for one of the given FlowFiles, then all children must also be migrated. Otherwise, we
+            // could have a case where we have FlowFile A transferred and eventually exiting the flow and later the 'newOwner'
+            // ProcessSession is committed, claiming to have created FlowFiles from the parent, which is no longer even in
+            // the flow. This would be very confusing when looking at the provenance for the FlowFile, so it is best to avoid this.
+            final Set<String> flowFileIds = flowFiles.stream()
+                .map(ff -> ff.getAttribute(CoreAttributes.UUID.key()))
+                .collect(Collectors.toSet());
 
-        forkedFlowFilesMigrated.forEach(forkEventBuilders::remove);
-
-        newOwner.processingStartTime = Math.min(newOwner.processingStartTime, processingStartTime);
-
-        for (final FlowFile flowFile : flowFiles) {
-            final FlowFileRecord flowFileRecord = (FlowFileRecord) flowFile;
-
-            final long flowFileId = flowFile.getId();
-            final StandardRepositoryRecord repoRecord = this.records.remove(flowFileId);
-            newOwner.records.put(flowFileId, repoRecord);
-
-            final Collection<Long> linkedIds = this.flowFileLinkage.remove(flowFileId);
-            if (linkedIds != null) {
-                linkedIds.forEach(linkedId -> newOwner.flowFileLinkage.addLink(flowFileId, linkedId));
-            }
-
-            // Adjust the counts for Connections for each FlowFile that was pulled from a Connection.
-            // We do not have to worry about accounting for 'input counts' on connections because those
-            // are incremented only during a checkpoint, and anything that's been checkpointed has
-            // also been committed above.
-            final FlowFileQueue inputQueue = repoRecord.getOriginalQueue();
-            if (inputQueue != null) {
-                final String connectionId = inputQueue.getIdentifier();
-                incrementConnectionOutputCounts(connectionId, -1, -repoRecord.getOriginal().getSize());
-                newOwner.incrementConnectionOutputCounts(connectionId, 1, repoRecord.getOriginal().getSize());
-
-                unacknowledgedFlowFiles.get(inputQueue).remove(flowFile);
-                newOwner.unacknowledgedFlowFiles.computeIfAbsent(inputQueue, queue -> new HashSet<>()).add(flowFileRecord);
-
-                flowFilesIn--;
-                contentSizeIn -= flowFile.getSize();
-
-                newOwner.flowFilesIn++;
-                newOwner.contentSizeIn += flowFile.getSize();
+            for (final Map.Entry<FlowFile, ProvenanceEventBuilder> entry : forkEventBuilders.entrySet()) {
+                final FlowFile eventFlowFile = entry.getKey();
+                if (flowFiles.contains(eventFlowFile)) {
+                    final ProvenanceEventBuilder eventBuilder = entry.getValue();
+                    for (final String childId : eventBuilder.getChildFlowFileIds()) {
+                        if (!flowFileIds.contains(childId)) {
+                            throw new FlowFileHandlingException("Cannot migrate " + eventFlowFile + " to a new session because it was forked to create " + eventBuilder.getChildFlowFileIds().size()
+                                + " children and not all children are being migrated. If any FlowFile is forked, all of its children must also be migrated at the same time as the forked FlowFile");
+                        }
+                    }
+                } else {
+                    final ProvenanceEventBuilder eventBuilder = entry.getValue();
+                    for (final String childId : eventBuilder.getChildFlowFileIds()) {
+                        if (flowFileIds.contains(childId)) {
+                            throw new FlowFileHandlingException("Cannot migrate " + eventFlowFile + " to a new session because it was forked from a Parent FlowFile, " +
+                                "but the parent is not being migrated. If any FlowFile is forked, the parent and all children must be migrated at the same time.");
+                        }
+                    }
+                }
             }
 
-            final String flowFileUuid = flowFile.getAttribute(CoreAttributes.UUID.key());
-            if (removedFlowFiles.remove(flowFileUuid)) {
-                newOwner.removedFlowFiles.add(flowFileUuid);
-                newOwner.removedCount++;
-                newOwner.removedBytes += flowFile.getSize();
+            // If we have a FORK event where a FlowFile is a child of the FORK event, we want to create a FORK
+            // event builder for the new owner of the FlowFile and remove the child from our fork event builder.
+            final Set<FlowFile> forkedFlowFilesMigrated = new HashSet<>();
+            for (final Map.Entry<FlowFile, ProvenanceEventBuilder> entry : forkEventBuilders.entrySet()) {
+                final FlowFile eventFlowFile = entry.getKey();
+                final ProvenanceEventBuilder eventBuilder = entry.getValue();
 
-                removedCount--;
-                removedBytes -= flowFile.getSize();
+                // If the FlowFile that the event is attached to is not being migrated, we should not migrate the fork event builder either.
+                if (!flowFiles.contains(eventFlowFile)) {
+                    continue;
+                }
+
+                final Set<String> childrenIds = new HashSet<>(eventBuilder.getChildFlowFileIds());
+
+                ProvenanceEventBuilder copy = null;
+                for (final FlowFile flowFile : flowFiles) {
+                    final String flowFileId = flowFile.getAttribute(CoreAttributes.UUID.key());
+                    if (childrenIds.contains(flowFileId)) {
+                        eventBuilder.removeChildFlowFile(flowFile);
+
+                        if (copy == null) {
+                            copy = eventBuilder.copy();
+                            copy.getChildFlowFileIds().clear();
+                        }
+                        copy.addChildFlowFile(flowFileId);
+                    }
+                }
+
+                if (copy != null) {
+                    newOwner.forkEventBuilders.put(eventFlowFile, copy);
+                    forkedFlowFilesMigrated.add(eventFlowFile);
+                }
             }
 
-            if (createdFlowFiles.remove(flowFileUuid)) {
-                newOwner.createdFlowFiles.add(flowFileUuid);
-            }
+            forkedFlowFilesMigrated.forEach(forkEventBuilders::remove);
 
-            if (repoRecord.getTransferRelationship() != null) {
-                final Relationship transferRelationship = repoRecord.getTransferRelationship();
-                final Collection<Connection> destinations = context.getConnections(transferRelationship);
-                final int numDestinations = destinations.size();
-                final boolean autoTerminated = numDestinations == 0 && context.getConnectable().isAutoTerminated(transferRelationship);
+            newOwner.processingStartTime = Math.min(newOwner.processingStartTime, processingStartTime);
 
-                if (autoTerminated) {
-                    removedCount--;
-                    removedBytes -= flowFile.getSize();
+            for (final FlowFile flowFile : flowFiles) {
+                final FlowFileRecord flowFileRecord = (FlowFileRecord) flowFile;
 
+                final long flowFileId = flowFile.getId();
+                final StandardRepositoryRecord repoRecord = this.records.remove(flowFileId);
+                newOwner.records.put(flowFileId, repoRecord);
+
+                final Collection<Long> linkedIds = this.flowFileLinkage.remove(flowFileId);
+                if (linkedIds != null) {
+                    linkedIds.forEach(linkedId -> newOwner.flowFileLinkage.addLink(flowFileId, linkedId));
+                }
+
+                // Adjust the counts for Connections for each FlowFile that was pulled from a Connection.
+                // We do not have to worry about accounting for 'input counts' on connections because those
+                // are incremented only during a checkpoint, and anything that's been checkpointed has
+                // also been committed above.
+                final FlowFileQueue inputQueue = repoRecord.getOriginalQueue();
+                if (inputQueue != null) {
+                    final String connectionId = inputQueue.getIdentifier();
+                    incrementConnectionOutputCounts(connectionId, -1, -repoRecord.getOriginal().getSize());
+                    newOwner.incrementConnectionOutputCounts(connectionId, 1, repoRecord.getOriginal().getSize());
+
+                    unacknowledgedFlowFiles.get(inputQueue).remove(flowFile);
+                    newOwner.unacknowledgedFlowFiles.computeIfAbsent(inputQueue, queue -> new HashSet<>()).add(flowFileRecord);
+
+                    flowFilesIn--;
+                    contentSizeIn -= flowFile.getSize();
+
+                    newOwner.flowFilesIn++;
+                    newOwner.contentSizeIn += flowFile.getSize();
+                }
+
+                final String flowFileUuid = flowFile.getAttribute(CoreAttributes.UUID.key());
+                if (removedFlowFiles.remove(flowFileUuid)) {
+                    newOwner.removedFlowFiles.add(flowFileUuid);
                     newOwner.removedCount++;
                     newOwner.removedBytes += flowFile.getSize();
-                } else {
-                    flowFilesOut--;
-                    contentSizeOut -= flowFile.getSize();
 
-                    newOwner.flowFilesOut++;
-                    newOwner.contentSizeOut += flowFile.getSize();
+                    removedCount--;
+                    removedBytes -= flowFile.getSize();
+                }
+
+                if (createdFlowFiles.remove(flowFileUuid)) {
+                    newOwner.createdFlowFiles.add(flowFileUuid);
+                }
+
+                if (repoRecord.getTransferRelationship() != null) {
+                    final Relationship transferRelationship = repoRecord.getTransferRelationship();
+                    final Collection<Connection> destinations = context.getConnections(transferRelationship);
+                    final int numDestinations = destinations.size();
+                    final boolean autoTerminated = numDestinations == 0 && context.getConnectable().isAutoTerminated(transferRelationship);
+
+                    if (autoTerminated) {
+                        removedCount--;
+                        removedBytes -= flowFile.getSize();
+
+                        newOwner.removedCount++;
+                        newOwner.removedBytes += flowFile.getSize();
+                    } else {
+                        flowFilesOut--;
+                        contentSizeOut -= flowFile.getSize();
+
+                        newOwner.flowFilesOut++;
+                        newOwner.contentSizeOut += flowFile.getSize();
+                    }
+                }
+
+                final List<ProvenanceEventRecord> events = generatedProvenanceEvents.remove(flowFile);
+                if (events != null) {
+                    newOwner.generatedProvenanceEvents.put(flowFile, events);
+                }
+
+                final ContentClaim currentClaim = repoRecord.getCurrentClaim();
+                if (currentClaim != null) {
+                    final ByteCountingOutputStream appendableStream = appendableStreams.remove(currentClaim);
+                    if (appendableStream != null) {
+                        newOwner.appendableStreams.put(currentClaim, appendableStream);
+                    }
+                }
+
+                final Path toDelete = deleteOnCommit.remove(flowFile);
+                if (toDelete != null) {
+                    newOwner.deleteOnCommit.put(flowFile, toDelete);
                 }
             }
 
-            final List<ProvenanceEventRecord> events = generatedProvenanceEvents.remove(flowFile);
-            if (events != null) {
-                newOwner.generatedProvenanceEvents.put(flowFile, events);
-            }
-
-            final ContentClaim currentClaim = repoRecord.getCurrentClaim();
-            if (currentClaim != null) {
-                final ByteCountingOutputStream appendableStream = appendableStreams.remove(currentClaim);
-                if (appendableStream != null) {
-                    newOwner.appendableStreams.put(currentClaim, appendableStream);
-                }
-            }
-
-            final Path toDelete = deleteOnCommit.remove(flowFile);
-            if (toDelete != null) {
-                newOwner.deleteOnCommit.put(flowFile, toDelete);
-            }
+            provenanceReporter.migrate(newOwner.provenanceReporter, flowFileIds);
         }
-
-        provenanceReporter.migrate(newOwner.provenanceReporter, flowFileIds);
     }
 
 
@@ -1793,11 +1814,7 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
         flowFilesIn++;
         contentSizeIn += flowFile.getSize();
 
-        Set<FlowFileRecord> set = unacknowledgedFlowFiles.get(connection.getFlowFileQueue());
-        if (set == null) {
-            set = new HashSet<>();
-            unacknowledgedFlowFiles.put(connection.getFlowFileQueue(), set);
-        }
+        final Set<FlowFileRecord> set = unacknowledgedFlowFiles.computeIfAbsent(connection.getFlowFileQueue(), k -> new HashSet<>());
         set.add(flowFile);
 
         incrementConnectionOutputCounts(connection, flowFile);
@@ -2591,7 +2608,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                         }
 
                         final InputStream limitingInputStream = new LimitingInputStream(new DisableOnCloseInputStream(currentReadClaimStream), flowFile.getSize());
-                        final ContentClaimInputStream contentClaimInputStream = new ContentClaimInputStream(context.getContentRepository(), claim, contentClaimOffset, limitingInputStream);
+                        final ContentClaimInputStream contentClaimInputStream = new ContentClaimInputStream(context.getContentRepository(), claim,
+                            contentClaimOffset, limitingInputStream, performanceTracker);
                         return contentClaimInputStream;
                     }
                 }
@@ -2603,8 +2621,13 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                 }
 
                 currentReadClaim = claim.getResourceClaim();
+
+                performanceTracker.beginContentRead();
                 final InputStream contentRepoStream = context.getContentRepository().read(claim.getResourceClaim());
-                StreamUtils.skip(contentRepoStream, claim.getOffset() + contentClaimOffset);
+                performanceTracker.endContentRead();
+
+                final InputStream performanceTrackInputStream = new PerformanceTrackingInputStream(contentRepoStream, performanceTracker);
+                StreamUtils.skip(performanceTrackInputStream, claim.getOffset() + contentClaimOffset);
                 final InputStream bufferedContentStream = new BufferedInputStream(contentRepoStream);
                 final ByteCountingInputStream byteCountingInputStream = new ByteCountingInputStream(bufferedContentStream, claim.getOffset() + contentClaimOffset);
                 currentReadClaimStream = byteCountingInputStream;
@@ -2615,12 +2638,12 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                 // Finally, we need to wrap the InputStream in a ContentClaimInputStream so that if mark/reset is used, we can provide that capability
                 // without buffering data in memory.
                 final InputStream limitingInputStream = new LimitingInputStream(new DisableOnCloseInputStream(currentReadClaimStream), flowFile.getSize());
-                final ContentClaimInputStream contentClaimInputStream = new ContentClaimInputStream(context.getContentRepository(), claim, contentClaimOffset, limitingInputStream);
+                final ContentClaimInputStream contentClaimInputStream = new ContentClaimInputStream(context.getContentRepository(), claim, contentClaimOffset, limitingInputStream, performanceTracker);
                 return contentClaimInputStream;
             } else {
                 claimCache.flush(claim);
 
-                final InputStream rawInStream = new ContentClaimInputStream(context.getContentRepository(), claim, contentClaimOffset);
+                final InputStream rawInStream = new ContentClaimInputStream(context.getContentRepository(), claim, contentClaimOffset, performanceTracker);
                 return rawInStream;
             }
         } catch (final ContentNotFoundException cnfe) {
@@ -2964,7 +2987,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             ensureNotAppending(newClaim);
 
             final OutputStream rawStream = claimCache.write(newClaim);
-            final OutputStream disableOnClose = new DisableOnCloseOutputStream(rawStream);
+            final OutputStream nonFlushable = new NonFlushableOutputStream(rawStream);
+            final OutputStream disableOnClose = new DisableOnCloseOutputStream(nonFlushable);
             final ByteCountingOutputStream countingOut = new ByteCountingOutputStream(disableOnClose);
 
             final FlowFile sourceFlowFile = source;
@@ -3100,7 +3124,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
 
             ensureNotAppending(newClaim);
             try (final OutputStream stream = claimCache.write(newClaim);
-                final OutputStream disableOnClose = new DisableOnCloseOutputStream(stream);
+                final NonFlushableOutputStream nonFlushableOutputStream = new NonFlushableOutputStream(stream);
+                final OutputStream disableOnClose = new DisableOnCloseOutputStream(nonFlushableOutputStream);
                 final ByteCountingOutputStream countingOut = new ByteCountingOutputStream(disableOnClose)) {
                 try {
                     writeRecursionSet.add(source);
@@ -3392,7 +3417,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                 final InputStream disableOnCloseIn = new DisableOnCloseInputStream(limitedIn);
                 final ByteCountingInputStream countingIn = new ByteCountingInputStream(disableOnCloseIn, bytesRead);
                 final OutputStream os = claimCache.write(newClaim);
-                final OutputStream disableOnCloseOut = new DisableOnCloseOutputStream(os);
+                final OutputStream nonFlushableOut = new NonFlushableOutputStream(os);
+                final OutputStream disableOnCloseOut = new DisableOnCloseOutputStream(nonFlushableOut);
                 final ByteCountingOutputStream countingOut = new ByteCountingOutputStream(disableOnCloseOut)) {
 
                 writeRecursionSet.add(source);
@@ -3592,7 +3618,6 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
             claimCache.flush(record.getCurrentClaim());
             final long copyCount = context.getContentRepository().exportTo(record.getCurrentClaim(), destination, append, record.getCurrentClaimOffset(), source.getSize());
             bytesRead += copyCount;
-            bytesWritten += copyCount;
         } catch (final ContentNotFoundException nfe) {
             handleContentNotFound(nfe, record);
         } catch (final Throwable t) {
@@ -3638,6 +3663,8 @@ public class StandardProcessSession implements ProcessSession, ProvenanceEventEn
                     throw cnfe;
                 } finally {
                     decrementReadCount(source);
+                    final long streamBytesRead = countingStream.getBytesRead();
+                    bytesRead += streamBytesRead;
 
                     // if cnfeThrown is true, we don't need to re-throw the Exception; it will propagate.
                     if (!cnfeThrown && ffais.getContentNotFoundException() != null) {

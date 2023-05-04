@@ -16,6 +16,8 @@
  */
 package org.apache.nifi.processors;
 
+import com.maxmind.geoip2.DatabaseReader;
+import com.maxmind.geoip2.exception.GeoIp2Exception;
 import com.maxmind.geoip2.model.IspResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.behavior.EventDriven;
@@ -31,7 +33,6 @@ import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processors.maxmind.DatabaseReader;
 import org.apache.nifi.util.StopWatch;
 
 import java.io.IOException;
@@ -46,7 +47,7 @@ import java.util.concurrent.TimeUnit;
 @Tags({"ISP", "enrich", "ip", "maxmind"})
 @InputRequirement(Requirement.INPUT_REQUIRED)
 @CapabilityDescription("Looks up ISP information for an IP address and adds the information to FlowFile attributes. The "
-        + "ISP data is provided as a MaxMind ISP database (Note that this is NOT the same as the GeoLite database utilized" +
+        + "ISP data is provided as a MaxMind ISP database. (Note that this is NOT the same as the GeoLite database utilized " +
         "by some geo enrichment tools). The attribute that contains the IP address to lookup is provided by the " +
         "'IP Address Attribute' property. If the name of the attribute provided is 'X', then the the attributes added by" +
         " enrichment will take the form X.isp.<fieldName>")
@@ -93,7 +94,7 @@ public class ISPEnrichIP extends AbstractEnrichIP {
         try {
             response = dbReader.isp(inetAddress);
             stopWatch.stop();
-        } catch (final IOException ex) {
+        } catch (GeoIp2Exception | IOException ex) {
             // Note IOException is captured again as dbReader also makes InetAddress.getByName() calls.
             // Most name or IP resolutions failure should have been triggered in the try loop above but
             // environmental conditions may trigger errors during the second resolution as well.

@@ -37,9 +37,8 @@ import org.apache.nifi.serialization.record.RecordSchema;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
@@ -52,7 +51,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestLookupRecord {
 
@@ -61,7 +61,7 @@ public class TestLookupRecord {
     private MockRecordParser recordReader;
     private MockRecordWriter recordWriter;
 
-    @Before
+    @BeforeEach
     public void setup() throws InitializationException {
         recordReader = new MockRecordParser();
         recordWriter = new MockRecordWriter(null, false);
@@ -192,6 +192,24 @@ public class TestLookupRecord {
         unmatched.assertAttributeEquals("record.count", "1");
         unmatched.assertAttributeEquals("mime.type", "text/plain");
         unmatched.assertContentEquals("Jane Doe,47,\n");
+    }
+
+    @Test
+    public void testAllMatchButFirstRouteToSuccess() {
+        lookupService.addValue("Jane Doe", "Soccer");
+        lookupService.addValue("Jimmy Doe", "Football");
+        runner.setProperty(LookupRecord.ROUTING_STRATEGY, LookupRecord.ROUTE_TO_SUCCESS);
+
+        runner.enqueue("");
+        runner.run();
+
+        runner.assertTransferCount(LookupRecord.REL_FAILURE, 0);
+        runner.assertTransferCount(LookupRecord.REL_SUCCESS, 1);
+
+        final MockFlowFile matched = runner.getFlowFilesForRelationship(LookupRecord.REL_SUCCESS).get(0);
+        matched.assertAttributeEquals("record.count", "3");
+        matched.assertAttributeEquals("mime.type", "text/plain");
+        matched.assertContentEquals("John Doe,48,\nJane Doe,47,Soccer\nJimmy Doe,14,Football\n");
     }
 
 
@@ -551,6 +569,19 @@ public class TestLookupRecord {
         out.assertContentEquals(new File("src/test/resources/TestLookupRecord/lookup-array-output-unmatched.json").toPath());
     }
 
+
+    @Test
+    public void testLiteralCoordinate() {
+        lookupService.addValue("lookupKey", "lookupValue");
+
+        runner.setProperty("lookup", "toString('lookupKey', 'UTF-8')");
+
+        runner.enqueue("");
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(LookupRecord.REL_MATCHED, 1);
+    }
+
     private static class MapLookup extends AbstractControllerService implements StringLookupService {
         protected final Map<String, String> values = new HashMap<>();
         private Map<String, Object> expectedContext;
@@ -596,9 +627,9 @@ public class TestLookupRecord {
         private void validateContext(Map<String, String> context) {
             if (expectedContext != null) {
                 for (Map.Entry<String, Object> entry : expectedContext.entrySet()) {
-                    Assert.assertTrue(String.format("%s was not in coordinates.", entry.getKey()),
-                            context.containsKey(entry.getKey()));
-                    Assert.assertEquals("Wrong value", entry.getValue(), context.get(entry.getKey()));
+                    assertTrue(context.containsKey(entry.getKey()),
+                            String.format("%s was not in coordinates.", entry.getKey()));
+                    assertEquals(entry.getValue(), context.get(entry.getKey()), "Wrong value");
                 }
             }
         }

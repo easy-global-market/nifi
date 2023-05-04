@@ -16,16 +16,10 @@
  */
 package org.apache.nifi.processors.azure;
 
-import com.azure.core.credential.AccessToken;
-import com.azure.core.credential.TokenCredential;
-import com.azure.identity.ClientSecretCredential;
-import com.azure.identity.ClientSecretCredentialBuilder;
-import com.azure.identity.ManagedIdentityCredential;
-import com.azure.identity.ManagedIdentityCredentialBuilder;
-import com.azure.storage.common.StorageSharedKeyCredential;
 import com.azure.storage.file.datalake.DataLakeServiceClient;
-import com.azure.storage.file.datalake.DataLakeServiceClientBuilder;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
@@ -38,14 +32,14 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.processors.azure.storage.utils.AzureStorageUtils;
+import org.apache.nifi.processors.azure.storage.utils.DataLakeServiceClientFactory;
 import org.apache.nifi.services.azure.storage.ADLSCredentialsDetails;
 import org.apache.nifi.services.azure.storage.ADLSCredentialsService;
-import reactor.core.publisher.Mono;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -63,7 +57,7 @@ public abstract class AbstractAzureDataLakeStorageProcessor extends AbstractProc
 
     public static final PropertyDescriptor FILESYSTEM = new PropertyDescriptor.Builder()
             .name("filesystem-name").displayName("Filesystem Name")
-            .description("Name of the Azure Storage File System. It is assumed to be already existing.")
+            .description("Name of the Azure Storage File System (also called Container). It is assumed to be already existing.")
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
             .required(true)
@@ -94,84 +88,38 @@ public abstract class AbstractAzureDataLakeStorageProcessor extends AbstractProc
             "Files that could not be written to Azure storage for some reason are transferred to this relationship")
             .build();
 
-    private static final List<PropertyDescriptor> PROPERTIES = Collections.unmodifiableList(Arrays.asList(
-            ADLS_CREDENTIALS_SERVICE,
-            FILESYSTEM,
-            DIRECTORY,
-            FILE
-    ));
-
     private static final Set<Relationship> RELATIONSHIPS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             REL_SUCCESS,
             REL_FAILURE
     )));
 
-    @Override
-    protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-        return PROPERTIES;
-    }
+    public static final String TEMP_FILE_DIRECTORY = "_nifitempdirectory";
+
+    private DataLakeServiceClientFactory clientFactory;
 
     @Override
     public Set<Relationship> getRelationships() {
         return RELATIONSHIPS;
     }
 
-    public static DataLakeServiceClient getStorageClient(PropertyContext context, FlowFile flowFile) {
+    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+        clientFactory = new DataLakeServiceClientFactory(getLogger(), AzureStorageUtils.getProxyOptions(context));
+    }
+
+    @OnStopped
+    public void onStopped() {
+        clientFactory = null;
+    }
+
+    public DataLakeServiceClient getStorageClient(PropertyContext context, FlowFile flowFile) {
         final Map<String, String> attributes = flowFile != null ? flowFile.getAttributes() : Collections.emptyMap();
 
         final ADLSCredentialsService credentialsService = context.getProperty(ADLS_CREDENTIALS_SERVICE).asControllerService(ADLSCredentialsService.class);
 
         final ADLSCredentialsDetails credentialsDetails = credentialsService.getCredentialsDetails(attributes);
 
-        final String accountName = credentialsDetails.getAccountName();
-        final String accountKey = credentialsDetails.getAccountKey();
-        final String sasToken = credentialsDetails.getSasToken();
-        final AccessToken accessToken = credentialsDetails.getAccessToken();
-        final String endpointSuffix = credentialsDetails.getEndpointSuffix();
-        final boolean useManagedIdentity = credentialsDetails.getUseManagedIdentity();
-        final String managedIdentityClientId = credentialsDetails.getManagedIdentityClientId();
-        final String servicePrincipalTenantId = credentialsDetails.getServicePrincipalTenantId();
-        final String servicePrincipalClientId = credentialsDetails.getServicePrincipalClientId();
-        final String servicePrincipalClientSecret = credentialsDetails.getServicePrincipalClientSecret();
-
-        final String endpoint = String.format("https://%s.%s", accountName, endpointSuffix);
-
-        final DataLakeServiceClient storageClient;
-        if (StringUtils.isNotBlank(accountKey)) {
-            final StorageSharedKeyCredential credential = new StorageSharedKeyCredential(accountName,
-                    accountKey);
-            storageClient = new DataLakeServiceClientBuilder().endpoint(endpoint).credential(credential)
-                    .buildClient();
-        } else if (StringUtils.isNotBlank(sasToken)) {
-            storageClient = new DataLakeServiceClientBuilder().endpoint(endpoint).sasToken(sasToken)
-                    .buildClient();
-        } else if (accessToken != null) {
-            final TokenCredential credential = tokenRequestContext -> Mono.just(accessToken);
-
-            storageClient = new DataLakeServiceClientBuilder().endpoint(endpoint).credential(credential)
-                    .buildClient();
-        } else if (useManagedIdentity) {
-            final ManagedIdentityCredential misCredential = new ManagedIdentityCredentialBuilder()
-                    .clientId(managedIdentityClientId)
-                    .build();
-            storageClient = new DataLakeServiceClientBuilder()
-                    .endpoint(endpoint)
-                    .credential(misCredential)
-                    .buildClient();
-        } else if (StringUtils.isNoneBlank(servicePrincipalTenantId, servicePrincipalClientId, servicePrincipalClientSecret)) {
-            final ClientSecretCredential credential = new ClientSecretCredentialBuilder()
-                    .tenantId(servicePrincipalTenantId)
-                    .clientId(servicePrincipalClientId)
-                    .clientSecret(servicePrincipalClientSecret)
-                    .build();
-
-            storageClient = new DataLakeServiceClientBuilder()
-                    .endpoint(endpoint)
-                    .credential(credential)
-                    .buildClient();
-        } else {
-            throw new IllegalArgumentException("No valid credentials were provided");
-        }
+        final DataLakeServiceClient storageClient = clientFactory.getStorageClient(credentialsDetails);
 
         return storageClient;
     }

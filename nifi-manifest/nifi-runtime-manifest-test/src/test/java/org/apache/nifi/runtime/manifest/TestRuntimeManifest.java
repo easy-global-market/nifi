@@ -27,28 +27,35 @@ import org.apache.nifi.c2.protocol.component.api.PropertyDescriptor;
 import org.apache.nifi.c2.protocol.component.api.PropertyResourceDefinition;
 import org.apache.nifi.c2.protocol.component.api.Relationship;
 import org.apache.nifi.c2.protocol.component.api.ReportingTaskDefinition;
+import org.apache.nifi.c2.protocol.component.api.Restriction;
 import org.apache.nifi.c2.protocol.component.api.RuntimeManifest;
 import org.apache.nifi.c2.protocol.component.api.SchedulingDefaults;
+import org.apache.nifi.components.RequiredPermission;
 import org.apache.nifi.components.resource.ResourceCardinality;
 import org.apache.nifi.components.resource.ResourceType;
+import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.scheduling.SchedulingStrategy;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class TestRuntimeManifest {
+class TestRuntimeManifest {
+
+    public static final String LIST_HDFS_DEFAULT_SCHEDULE_TIME = "1 min";
 
     @Test
-    public void testRuntimeManifest() throws IOException {
+    void testRuntimeManifest() throws IOException {
         final ObjectMapper objectMapper = new ObjectMapper();
 
         final RuntimeManifest runtimeManifest;
@@ -98,8 +105,22 @@ public class TestRuntimeManifest {
         assertFalse(listHdfsDefinition.getSideEffectFree());
         assertFalse(listHdfsDefinition.getTriggerWhenAnyDestinationAvailable());
         assertFalse(listHdfsDefinition.getSupportsDynamicProperties());
+        assertNull(listHdfsDefinition.getDynamicProperties());
         assertFalse(listHdfsDefinition.getSupportsDynamicRelationships());
+        assertNull(listHdfsDefinition.getDynamicRelationship());
         assertEquals(InputRequirement.Requirement.INPUT_FORBIDDEN, listHdfsDefinition.getInputRequirement());
+        assertTrue(listHdfsDefinition.isAdditionalDetails());
+        assertNull(listHdfsDefinition.getReadsAttributes());
+        assertNotNull(listHdfsDefinition.getWritesAttributes());
+        assertFalse(listHdfsDefinition.getWritesAttributes().isEmpty());
+        assertNotNull(listHdfsDefinition.getWritesAttributes().get(0).getName());
+        assertNotNull(listHdfsDefinition.getWritesAttributes().get(0).getDescription());
+        assertNotNull(listHdfsDefinition.getSeeAlso());
+        assertFalse(listHdfsDefinition.getSeeAlso().isEmpty());
+        assertNull(listHdfsDefinition.getSystemResourceConsiderations());
+        assertNull(listHdfsDefinition.getDeprecated());
+        assertNull(listHdfsDefinition.getDeprecationReason());
+        assertNull(listHdfsDefinition.getDeprecationAlternatives());
 
         assertEquals("30 sec", listHdfsDefinition.getDefaultPenaltyDuration());
         assertEquals("1 sec", listHdfsDefinition.getDefaultYieldDuration());
@@ -122,7 +143,7 @@ public class TestRuntimeManifest {
         final Map<String, String> listHdfsDefaultSchedulingPeriods = listHdfsDefinition.getDefaultSchedulingPeriodBySchedulingStrategy();
         assertNotNull(listHdfsDefaultSchedulingPeriods);
         assertEquals(2, listHdfsDefaultSchedulingPeriods.size());
-        assertEquals(SchedulingStrategy.TIMER_DRIVEN.getDefaultSchedulingPeriod(), listHdfsDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
+        assertEquals("1 min", listHdfsDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
         assertEquals(SchedulingStrategy.CRON_DRIVEN.getDefaultSchedulingPeriod(), listHdfsDefaultSchedulingPeriods.get(SchedulingStrategy.CRON_DRIVEN.name()));
 
         final List<Relationship> relationships = listHdfsDefinition.getSupportedRelationships();
@@ -139,9 +160,33 @@ public class TestRuntimeManifest {
         assertEquals(1, resourceDefinition.getResourceTypes().size());
         assertEquals(ResourceType.FILE, resourceDefinition.getResourceTypes().stream().findFirst().get());
 
+        assertNull(listHdfsDefinition.isRestricted());
+        assertNull(listHdfsDefinition.getRestrictedExplanation());
+        assertNull(listHdfsDefinition.getExplicitRestrictions());
+        assertNotNull(listHdfsDefinition.getStateful());
+        assertNotNull(listHdfsDefinition.getStateful().getDescription());
+        assertNotNull(listHdfsDefinition.getStateful().getScopes());
+        assertEquals(Scope.CLUSTER, listHdfsDefinition.getStateful().getScopes().stream().findFirst().get());
+
+        // Verify FetchHDFS definition has restrictions
+        final ProcessorDefinition fetchHdfsDefinition = getProcessorDefinition(bundles, "nifi-hadoop-nar",
+                "org.apache.nifi.processors.hadoop.FetchHDFS");
+        assertNotNull(fetchHdfsDefinition.isRestricted());
+        assertTrue(fetchHdfsDefinition.isRestricted());
+        assertFalse(fetchHdfsDefinition.isAdditionalDetails());
+
+        final Set<Restriction> restrictions = fetchHdfsDefinition.getExplicitRestrictions();
+        assertNotNull(restrictions);
+        assertEquals(1, restrictions.size());
+
+        final Restriction restriction = restrictions.stream().findFirst().orElse(null);
+        assertEquals(RequiredPermission.READ_DISTRIBUTED_FILESYSTEM.getPermissionLabel(), restriction.getRequiredPermission());
+        assertNotNull(restriction.getExplanation());
+
         // Verify ConsumeKafka_2_6 definition which has properties with dependencies
         final ProcessorDefinition consumeKafkaDefinition = getProcessorDefinition(bundles, "nifi-kafka-2-6-nar",
                 "org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6");
+        assertTrue(consumeKafkaDefinition.isAdditionalDetails());
 
         final PropertyDescriptor maxUncommitProp = getPropertyDescriptor(consumeKafkaDefinition, "max-uncommit-offset-wait");
         final List<PropertyDependency> propertyDependencies = maxUncommitProp.getDependencies();
@@ -170,7 +215,7 @@ public class TestRuntimeManifest {
         assertNotNull(ambariDefaultSchedulingPeriods);
         assertEquals(2, ambariDefaultSchedulingPeriods.size());
         // TIMER_DRIVEN period should come from the @DefaultSchedule annotation that overrides the default value
-        assertEquals("1 min", ambariDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
+        assertEquals(LIST_HDFS_DEFAULT_SCHEDULE_TIME, ambariDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
         assertEquals(SchedulingStrategy.CRON_DRIVEN.getDefaultSchedulingPeriod(), ambariDefaultSchedulingPeriods.get(SchedulingStrategy.CRON_DRIVEN.name()));
 
         // Verify JoltTransformRecord which has @EventDriven
@@ -196,8 +241,50 @@ public class TestRuntimeManifest {
         final Map<String, String> joltTransformDefaultSchedulingPeriods = listHdfsDefinition.getDefaultSchedulingPeriodBySchedulingStrategy();
         assertNotNull(joltTransformDefaultSchedulingPeriods);
         assertEquals(2, joltTransformDefaultSchedulingPeriods.size());
-        assertEquals(SchedulingStrategy.TIMER_DRIVEN.getDefaultSchedulingPeriod(), joltTransformDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
+        assertEquals(LIST_HDFS_DEFAULT_SCHEDULE_TIME, joltTransformDefaultSchedulingPeriods.get(SchedulingStrategy.TIMER_DRIVEN.name()));
         assertEquals(SchedulingStrategy.CRON_DRIVEN.getDefaultSchedulingPeriod(), joltTransformDefaultSchedulingPeriods.get(SchedulingStrategy.CRON_DRIVEN.name()));
+
+        // Verify ExecuteSQL has readsAttributes
+        final ProcessorDefinition executeSqlDef = getProcessorDefinition(bundles, "nifi-standard-nar",
+                "org.apache.nifi.processors.standard.ExecuteSQL");
+        assertNotNull(executeSqlDef.getReadsAttributes());
+        assertFalse(executeSqlDef.getReadsAttributes().isEmpty());
+        assertNotNull(executeSqlDef.getReadsAttributes().get(0).getName());
+        assertNotNull(executeSqlDef.getReadsAttributes().get(0).getDescription());
+
+        // Verify RouteOnAttribute dynamic relationships and dynamic properties
+        final ProcessorDefinition routeOnAttributeDef = getProcessorDefinition(bundles, "nifi-standard-nar",
+                "org.apache.nifi.processors.standard.RouteOnAttribute");
+
+        assertTrue(routeOnAttributeDef.getSupportsDynamicRelationships());
+        assertNotNull(routeOnAttributeDef.getDynamicRelationship());
+        assertNotNull(routeOnAttributeDef.getDynamicRelationship().getName());
+        assertNotNull(routeOnAttributeDef.getDynamicRelationship().getDescription());
+
+        assertTrue(routeOnAttributeDef.getSupportsDynamicProperties());
+        assertNotNull(routeOnAttributeDef.getDynamicProperties());
+        assertFalse(routeOnAttributeDef.getDynamicProperties().isEmpty());
+        assertNotNull(routeOnAttributeDef.getDynamicProperties().get(0).getName());
+        assertNotNull(routeOnAttributeDef.getDynamicProperties().get(0).getDescription());
+        assertNotNull(routeOnAttributeDef.getDynamicProperties().get(0).getValue());
+        assertNotNull(routeOnAttributeDef.getDynamicProperties().get(0).getExpressionLanguageScope());
+
+        // Verify DeleteAzureBlobStorage is deprecated
+        final ProcessorDefinition deleteAzureBlobDef = getProcessorDefinition(bundles, "nifi-azure-nar",
+                "org.apache.nifi.processors.azure.storage.DeleteAzureBlobStorage");
+        assertNotNull(deleteAzureBlobDef.getDeprecated());
+        assertTrue(deleteAzureBlobDef.getDeprecated().booleanValue());
+        assertNotNull(deleteAzureBlobDef.getDeprecationReason());
+        assertNotNull(deleteAzureBlobDef.getDeprecationAlternatives());
+        assertFalse(deleteAzureBlobDef.getDeprecationAlternatives().isEmpty());
+
+        // Verify SplitJson has @SystemResourceConsiderations
+        final ProcessorDefinition splitJsonDef = getProcessorDefinition(bundles, "nifi-standard-nar",
+                "org.apache.nifi.processors.standard.SplitJson");
+        assertNotNull(splitJsonDef.getSystemResourceConsiderations());
+        assertFalse(splitJsonDef.getSystemResourceConsiderations().isEmpty());
+        assertNotNull(splitJsonDef.getSystemResourceConsiderations().get(0).getResource());
+        assertNotNull(splitJsonDef.getSystemResourceConsiderations().get(0).getDescription());
     }
 
     private PropertyDescriptor getPropertyDescriptor(final ProcessorDefinition processorDefinition, final String propName) {

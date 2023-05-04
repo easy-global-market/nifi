@@ -30,6 +30,7 @@ import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.event.transport.EventException;
 import org.apache.nifi.event.transport.EventServer;
+import org.apache.nifi.event.transport.SslSessionStatus;
 import org.apache.nifi.event.transport.configuration.BufferAllocator;
 import org.apache.nifi.event.transport.configuration.TransportProtocol;
 import org.apache.nifi.event.transport.message.ByteArrayMessage;
@@ -47,6 +48,7 @@ import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.processor.util.listen.EventBatcher;
 import org.apache.nifi.processor.util.listen.FlowFileEventBatch;
 import org.apache.nifi.processor.util.listen.ListenerProperties;
+import org.apache.nifi.processor.util.listen.queue.TrackingLinkedBlockingQueue;
 import org.apache.nifi.remote.io.socket.NetworkUtils;
 import org.apache.nifi.security.util.ClientAuth;
 import org.apache.nifi.ssl.RestrictedSSLContextService;
@@ -56,6 +58,8 @@ import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.charset.Charset;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -66,6 +70,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @SupportsBatching
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
@@ -74,12 +80,24 @@ import java.util.concurrent.LinkedBlockingQueue;
         "as the message demarcator. The default behavior is for each message to produce a single FlowFile, however this can " +
         "be controlled by increasing the Batch Size to a larger value for higher throughput. The Receive Buffer Size must be " +
         "set as large as the largest messages expected to be received, meaning if every 100kb there is a line separator, then " +
-        "the Receive Buffer Size must be greater than 100kb.")
+        "the Receive Buffer Size must be greater than 100kb. " +
+        "The processor can be configured to use an SSL Context Service to only allow secure connections. " +
+        "When connected clients present certificates for mutual TLS authentication, the Distinguished Names of the client certificate's " +
+        "issuer and subject are added to the outgoing FlowFiles as attributes. " +
+        "The processor does not perform authorization based on Distinguished Name values, but since these values " +
+        "are attached to the outgoing FlowFiles, authorization can be implemented based on these attributes.")
 @WritesAttributes({
         @WritesAttribute(attribute="tcp.sender", description="The sending host of the messages."),
-        @WritesAttribute(attribute="tcp.port", description="The sending port the messages were received.")
+        @WritesAttribute(attribute="tcp.port", description="The sending port the messages were received."),
+        @WritesAttribute(attribute="client.certificate.issuer.dn", description="For connections using mutual TLS, the Distinguished Name of the " +
+                "Certificate Authority that issued the client's certificate " +
+                "is attached to the FlowFile."),
+        @WritesAttribute(attribute="client.certificate.subject.dn", description="For connections using mutual TLS, the Distinguished Name of the " +
+                "client certificate's owner (subject) is attached to the FlowFile.")
 })
 public class ListenTCP extends AbstractProcessor {
+    private static final String CLIENT_CERTIFICATE_SUBJECT_DN_ATTRIBUTE = "client.certificate.subject.dn";
+    private static final String CLIENT_CERTIFICATE_ISSUER_DN_ATTRIBUTE = "client.certificate.issuer.dn";
 
     public static final PropertyDescriptor SSL_CONTEXT_SERVICE = new PropertyDescriptor.Builder()
             .name("SSL Context Service")
@@ -117,15 +135,28 @@ public class ListenTCP extends AbstractProcessor {
             .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
             .build();
 
+    protected static final PropertyDescriptor IDLE_CONNECTION_TIMEOUT = new PropertyDescriptor.Builder()
+            .name("idle-timeout")
+            .displayName("Idle Connection Timeout")
+            .description("The amount of time a client's connection will remain open if no data is received. The default of 0 seconds will leave connections open until they are closed by the client.")
+            .required(true)
+            .defaultValue("0 seconds")
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
             .description("Messages received successfully will be sent out this relationship.")
             .build();
 
+    private static final long TRACKING_LOG_INTERVAL = 60000;
+    private final AtomicLong nextTrackingLog = new AtomicLong();
+    private int eventsCapacity;
+
     protected List<PropertyDescriptor> descriptors;
     protected Set<Relationship> relationships;
     protected volatile int port;
-    protected volatile BlockingQueue<ByteArrayMessage> events;
+    protected volatile TrackingLinkedBlockingQueue<ByteArrayMessage> events;
     protected volatile BlockingQueue<ByteArrayMessage> errorEvents;
     protected volatile EventServer eventServer;
     protected volatile byte[] messageDemarcatorBytes;
@@ -143,6 +174,7 @@ public class ListenTCP extends AbstractProcessor {
         descriptors.add(ListenerProperties.WORKER_THREADS);
         descriptors.add(ListenerProperties.MAX_BATCH_SIZE);
         descriptors.add(ListenerProperties.MESSAGE_DELIMITER);
+        descriptors.add(IDLE_CONNECTION_TIMEOUT);
         // Deprecated
         descriptors.add(MAX_RECV_THREAD_POOL_SIZE);
         descriptors.add(POOL_RECV_BUFFERS);
@@ -160,11 +192,13 @@ public class ListenTCP extends AbstractProcessor {
         int workerThreads = context.getProperty(ListenerProperties.WORKER_THREADS).asInteger();
         int bufferSize = context.getProperty(ListenerProperties.RECV_BUFFER_SIZE).asDataSize(DataUnit.B).intValue();
         int socketBufferSize = context.getProperty(ListenerProperties.MAX_SOCKET_BUFFER_SIZE).asDataSize(DataUnit.B).intValue();
+        Duration idleTimeout = Duration.ofSeconds(context.getProperty(IDLE_CONNECTION_TIMEOUT).asTimePeriod(TimeUnit.SECONDS));
         final String networkInterface = context.getProperty(ListenerProperties.NETWORK_INTF_NAME).evaluateAttributeExpressions().getValue();
         final InetAddress address = NetworkUtils.getInterfaceAddress(networkInterface);
         final Charset charset = Charset.forName(context.getProperty(ListenerProperties.CHARSET).getValue());
         port = context.getProperty(ListenerProperties.PORT).evaluateAttributeExpressions().asInteger();
-        events = new LinkedBlockingQueue<>(context.getProperty(ListenerProperties.MAX_MESSAGE_QUEUE_SIZE).asInteger());
+        eventsCapacity = context.getProperty(ListenerProperties.MAX_MESSAGE_QUEUE_SIZE).asInteger();
+        events = new TrackingLinkedBlockingQueue<>(eventsCapacity);
         errorEvents = new LinkedBlockingQueue<>();
         final String msgDemarcator = getMessageDemarcator(context);
         messageDemarcatorBytes = msgDemarcator.getBytes(charset);
@@ -182,7 +216,7 @@ public class ListenTCP extends AbstractProcessor {
         final boolean poolReceiveBuffers = context.getProperty(POOL_RECV_BUFFERS).asBoolean();
         final BufferAllocator bufferAllocator = poolReceiveBuffers ? BufferAllocator.POOLED : BufferAllocator.UNPOOLED;
         eventFactory.setBufferAllocator(bufferAllocator);
-
+        eventFactory.setIdleTimeout(idleTimeout);
         eventFactory.setSocketReceiveBuffer(socketBufferSize);
         eventFactory.setWorkerThreads(workerThreads);
         eventFactory.setThreadNamePrefix(String.format("%s[%s]", getClass().getSimpleName(), getIdentifier()));
@@ -196,6 +230,7 @@ public class ListenTCP extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
+        processTrackingLog();
         final int batchSize = context.getProperty(ListenerProperties.MAX_BATCH_SIZE).asInteger();
         Map<String, FlowFileEventBatch<ByteArrayMessage>> batches = getEventBatcher().getBatches(session, batchSize, messageDemarcatorBytes);
         processEvents(session, batches);
@@ -213,6 +248,7 @@ public class ListenTCP extends AbstractProcessor {
             }
 
             final Map<String,String> attributes = getAttributes(entry.getValue());
+            addClientCertificateAttributes(attributes, events.get(0));
             flowFile = session.putAllAttributes(flowFile, attributes);
 
             getLogger().debug("Transferring {} to success", flowFile);
@@ -290,5 +326,27 @@ public class ListenTCP extends AbstractProcessor {
             };
         }
         return eventBatcher;
+    }
+
+    private void addClientCertificateAttributes(final Map<String, String> attributes, final ByteArrayMessage event) {
+        final SslSessionStatus sslSessionStatus = event.getSslSessionStatus();
+        if (sslSessionStatus != null) {
+            attributes.put(CLIENT_CERTIFICATE_SUBJECT_DN_ATTRIBUTE, sslSessionStatus.getSubject().getName());
+            attributes.put(CLIENT_CERTIFICATE_ISSUER_DN_ATTRIBUTE, sslSessionStatus.getIssuer().getName());
+        }
+    }
+
+    private void processTrackingLog() {
+        final long now = Instant.now().toEpochMilli();
+        if (now > nextTrackingLog.get()) {
+            getLogger().debug("Event Queue Capacity [{}] Remaining [{}] Size [{}] Largest Size [{}]",
+                    eventsCapacity,
+                    events.remainingCapacity(),
+                    events.size(),
+                    events.getLargestSize()
+            );
+            final long nextTrackingLogScheduled = now + TRACKING_LOG_INTERVAL;
+            nextTrackingLog.getAndSet(nextTrackingLogScheduled);
+        }
     }
 }

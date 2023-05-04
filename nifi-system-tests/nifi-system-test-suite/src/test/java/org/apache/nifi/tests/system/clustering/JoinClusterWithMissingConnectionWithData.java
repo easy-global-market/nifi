@@ -27,7 +27,7 @@ import org.apache.nifi.web.api.dto.flow.FlowDTO;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.NodeEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -36,7 +36,7 @@ public class JoinClusterWithMissingConnectionWithData extends NiFiSystemIT {
     private static final String CONNECTION_UUID = "6be9a991-016e-1000-ffff-fffffebf0217";
 
     @Override
-    protected NiFiInstanceFactory getInstanceFactory() {
+    public NiFiInstanceFactory getInstanceFactory() {
         return new SpawnedClusterNiFiInstanceFactory(
             new InstanceConfiguration.Builder()
                 .bootstrapConfig("src/test/resources/conf/clustered/node1/bootstrap.conf")
@@ -64,7 +64,7 @@ public class JoinClusterWithMissingConnectionWithData extends NiFiSystemIT {
         ProcessorEntity generate = getNifiClient().getProcessorClient().getProcessor(GENERATE_UUID);
 
         // Start Generate Processor
-        generate = getNifiClient().getProcessorClient().startProcessor(generate);
+        generate = getClientUtil().startProcessor(generate);
 
         // Wait for data to be queued up, one FlowFile for each node.
         waitFor(this::isDataQueued);

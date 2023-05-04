@@ -34,7 +34,7 @@ FlowFile Repository:
     out period: 5 sec
     out threads: 4
 Content Repository:
-  implementation: org.apache.nifi.controller.repository.VolatileContentRepository
+  implementation: org.apache.nifi.controller.repository.OtherContentRepository
   content claim max appendable size: 10 MB
   content claim max flow files: 100
   always sync: false
@@ -54,7 +54,7 @@ Security Properties:
   ssl protocol: TLS
   Sensitive Props:
     key: ''
-    algorithm: PBEWITHMD5AND256BITAES-CBC-OPENSSL
+    algorithm: NIFI_PBKDF2_AES_GCM_256
     provider: BC
 Processors:
 - id: 94b8e610-b4ed-3ec9-b26f-c839931bf3e2

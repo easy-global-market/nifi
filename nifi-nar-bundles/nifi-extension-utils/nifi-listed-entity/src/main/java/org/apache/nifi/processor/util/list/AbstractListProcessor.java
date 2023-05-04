@@ -42,6 +42,7 @@ import org.apache.nifi.distributed.cache.client.Serializer;
 import org.apache.nifi.distributed.cache.client.exception.DeserializationException;
 import org.apache.nifi.distributed.cache.client.exception.SerializationException;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
@@ -542,6 +543,10 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         return System.currentTimeMillis();
     }
 
+    protected long getCurrentNanoTime() {
+        return System.nanoTime();
+    }
+
     public void listByNoTracking(final ProcessContext context, final ProcessSession session) {
         final List<T> entityList;
 
@@ -566,6 +571,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         }
 
         if (entityList == null || entityList.isEmpty()) {
+            getLogger().debug("No data found: yielding");
             context.yield();
             return;
         }
@@ -576,17 +582,17 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
             entitiesForTimestamp.add(entity);
         }
 
-        if (orderedEntries.size() > 0) {
-            for (Map.Entry<Long, List<T>> timestampEntities : orderedEntries.entrySet()) {
-                List<T> entities = timestampEntities.getValue();
-                for (T entity : entities) {
-                    // Create the FlowFile for this path.
-                    final Map<String, String> attributes = createAttributes(entity, context);
-                    FlowFile flowFile = session.create();
-                    flowFile = session.putAllAttributes(flowFile, attributes);
-                    session.transfer(flowFile, REL_SUCCESS);
-                }
+        final boolean writerSet = context.getProperty(RECORD_WRITER).isSet();
+        if (writerSet) {
+            try {
+                createRecordsForEntities(context, session, orderedEntries);
+            } catch (final IOException | SchemaNotFoundException e) {
+                getLogger().error("Failed to write listing to FlowFile", e);
+                context.yield();
+                return;
             }
+        } else {
+            createFlowFilesForEntities(context, session, orderedEntries);
         }
     }
 
@@ -654,6 +660,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
                             .computeIfAbsent(entity.getTimestamp(), __ -> new ArrayList<>())
                             .add(entity)
                     );
+
             if (getLogger().isTraceEnabled()) {
                 getLogger().trace("orderedEntries: " +
                         orderedEntries.values().stream()
@@ -669,7 +676,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         }
 
         if (orderedEntries.isEmpty()) {
-            getLogger().debug("There is no data to list. Yielding.");
+            getLogger().debug("There is no data to list: yielding");
             context.yield();
             return;
         }
@@ -732,6 +739,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
                 }
                 justElectedPrimaryNode = false;
                 if (noUpdateRequired) {
+                    getLogger().debug("No update required for last listed entity: yielding");
                     context.yield();
                     return;
                 }
@@ -743,8 +751,8 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         }
 
         final List<T> entityList;
-        final long currentRunTimeNanos = System.nanoTime();
-        final long currentRunTimeMillis = System.currentTimeMillis();
+        final long currentRunTimeNanos = getCurrentNanoTime();
+        final long currentRunTimeMillis = getCurrentTime();
         try {
             // track of when this last executed for consideration of the lag nanos
             entityList = performListing(context, minTimestampToListMillis, ListingMode.EXECUTION);
@@ -755,6 +763,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         }
 
         if (entityList == null || entityList.isEmpty()) {
+            getLogger().debug("No data found matching minimum timestamp [{}]: yielding", minTimestampToListMillis);
             context.yield();
             return;
         }
@@ -811,11 +820,20 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
                  *   - If we have not eclipsed the minimal listing lag needed due to being triggered too soon after the last run
                  *   - The latest listed entity timestamp is equal to the last processed time, meaning we handled those items originally passed over. No need to process it again.
                  */
-                final long  listingLagNanos = TimeUnit.MILLISECONDS.toNanos(listingLagMillis);
-                if (currentRunTimeNanos - lastRunTimeNanos < listingLagNanos
-                        || (latestListedEntryTimestampThisCycleMillis.equals(lastProcessedLatestEntryTimestampMillis)
-                        && orderedEntries.get(latestListedEntryTimestampThisCycleMillis).stream()
-                                .allMatch(entity -> latestIdentifiersProcessed.contains(entity.getIdentifier())))) {
+                final long listingLagNanos = TimeUnit.MILLISECONDS.toNanos(listingLagMillis);
+                final boolean minimalListingLagNotPassed = currentRunTimeNanos - lastRunTimeNanos < listingLagNanos;
+
+                if (minimalListingLagNotPassed) {
+                    getLogger().debug("Minimal listing lag not passed: yielding");
+                    context.yield();
+                    return;
+                }
+
+                final boolean latestListedEntryIsUpToDate = latestListedEntryTimestampThisCycleMillis.equals(lastProcessedLatestEntryTimestampMillis)
+                        && orderedEntries.get(latestListedEntryTimestampThisCycleMillis).stream().allMatch(entity -> latestIdentifiersProcessed.contains(entity.getIdentifier()));
+
+                if (latestListedEntryIsUpToDate) {
+                    getLogger().debug("Latest entry already listed with timestamp [{}]: yielding", latestListedEntryTimestampThisCycleMillis);
                     context.yield();
                     return;
                 }
@@ -890,7 +908,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
 
             lastRunTimeNanos = currentRunTimeNanos;
         } else {
-            getLogger().debug("There is no data to list. Yielding.");
+            getLogger().debug("There is no data to list: yielding");
             context.yield();
 
             // lastListingTime = 0 so that we don't continually poll the distributed cache / local file system
@@ -907,8 +925,11 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
         FlowFile flowFile = session.create();
         final WriteResult writeResult;
 
+        final Map<String, String> attributes = new HashMap<>();
+
         try (final OutputStream out = session.write(flowFile);
-             final RecordSetWriter recordSetWriter = writerFactory.createWriter(getLogger(), getRecordSchema(), out, Collections.emptyMap())) {
+            final RecordSetWriter recordSetWriter = writerFactory.createWriter(getLogger(), getRecordSchema(), out, Collections.emptyMap())) {
+            attributes.put(CoreAttributes.MIME_TYPE.key(), recordSetWriter.getMimeType());
 
             recordSetWriter.beginRecordSet();
             for (final Map.Entry<Long, List<T>> timestampEntities : orderedEntries.entrySet()) {
@@ -932,7 +953,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
             return 0;
         }
 
-        final Map<String, String> attributes = new HashMap<>(writeResult.getAttributes());
+        attributes.putAll(writeResult.getAttributes());
         attributes.put("record.count", String.valueOf(writeResult.getRecordCount()));
         flowFile = session.putAllAttributes(flowFile, attributes);
 
@@ -1096,7 +1117,7 @@ public abstract class AbstractListProcessor<T extends ListableEntity> extends Ab
     }
 
     protected ListedEntityTracker<T> createListedEntityTracker() {
-        return new ListedEntityTracker<>(getIdentifier(), getLogger(), getRecordSchema());
+        return new ListedEntityTracker<>(getIdentifier(), getLogger(), this::getCurrentTime, getRecordSchema());
     }
 
     private void listByTrackingEntities(ProcessContext context, ProcessSession session) throws ProcessException {

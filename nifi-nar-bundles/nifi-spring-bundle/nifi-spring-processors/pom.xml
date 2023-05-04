@@ -12,13 +12,13 @@
     <parent>
         <groupId>org.apache.nifi</groupId>
         <artifactId>nifi-spring-bundle</artifactId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>nifi-spring-processors</artifactId>
     <packaging>jar</packaging>
     <properties>
-        <spring.integration.version>5.5.9</spring.integration.version>
+        <spring.integration.version>5.5.15</spring.integration.version>
     </properties>
     <dependencies>
 
@@ -38,7 +38,6 @@
         <dependency>
             <groupId>commons-io</groupId>
             <artifactId>commons-io</artifactId>
-            <version>2.10.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
@@ -47,12 +46,12 @@
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-utils</artifactId>
-            <version>1.16.0-SNAPSHOT</version>
+            <version>1.21.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-mock</artifactId>
-            <version>1.16.0-SNAPSHOT</version>
+            <version>1.21.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>

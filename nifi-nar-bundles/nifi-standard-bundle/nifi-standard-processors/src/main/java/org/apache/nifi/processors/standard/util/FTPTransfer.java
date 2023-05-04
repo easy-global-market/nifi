@@ -32,6 +32,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -135,6 +136,10 @@ public class FTPTransfer implements FileTransfer {
             .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
             .build();
 
+    private static final int REPLY_CODE_FILE_UNAVAILABLE = 550;
+
+    private static final Pattern NOT_FOUND_MESSAGE_PATTERN = Pattern.compile("(no such)|(not exist)|(not found)", Pattern.CASE_INSENSITIVE);
+
     private static final FTPClientProvider FTP_CLIENT_PROVIDER = new StandardFTPClientProvider();
 
     private static final ProxySpec[] PROXY_SPECS = {ProxySpec.HTTP_AUTH, ProxySpec.SOCKS_AUTH};
@@ -148,6 +153,9 @@ public class FTPTransfer implements FileTransfer {
     private FTPClient client;
     private String homeDirectory;
     private String remoteHostName;
+    private String remotePort;
+    private String remoteUsername;
+    private String remotePassword;
 
     public FTPTransfer(final ProcessContext context, final ComponentLog logger) {
         this.ctx = context;
@@ -321,13 +329,22 @@ public class FTPTransfer implements FileTransfer {
         FlowFile resultFlowFile;
         try (InputStream in = client.retrieveFileStream(remoteFileName)) {
             if (in == null) {
-                final String response = client.getReplyString();
-                // FTPClient doesn't throw exception if file not found.
-                // Instead, response string will contain: "550 Can't open <absolute_path>: No such file or directory"
-                if (response != null && response.trim().endsWith("No such file or directory")) {
-                    throw new FileNotFoundException(response);
+                final String reply = client.getReplyString();
+                if (reply == null) {
+                    throw new IOException("Retrieve File Failed: FTP server response not found");
                 }
-                throw new IOException(response);
+
+                // Get reply code after checking for reply string
+                final int replyCode = client.getReplyCode();
+                if (REPLY_CODE_FILE_UNAVAILABLE == replyCode) {
+                    if (NOT_FOUND_MESSAGE_PATTERN.matcher(reply).find()) {
+                        throw new FileNotFoundException(reply);
+                    } else {
+                        throw new PermissionDeniedException(reply);
+                    }
+                }
+
+                throw new IOException(reply);
             }
             resultFlowFile = session.write(origFlowFile, out -> StreamUtils.copy(in, out));
             client.completePendingCommand();
@@ -533,10 +550,16 @@ public class FTPTransfer implements FileTransfer {
 
     private FTPClient getClient(final FlowFile flowFile) throws IOException {
         final String hostname = ctx.getProperty(HOSTNAME).evaluateAttributeExpressions(flowFile).getValue();
+        final String port = ctx.getProperty(PORT).evaluateAttributeExpressions(flowFile).getValue();
+        final String username = ctx.getProperty(FileTransfer.USERNAME).evaluateAttributeExpressions(flowFile).getValue();
+        final String password = ctx.getProperty(FileTransfer.PASSWORD).evaluateAttributeExpressions(flowFile).getValue();
 
         if (client != null) {
-            if (remoteHostName.equals(hostname)) {
-                // destination matches so we can keep our current session
+            if (Objects.equals(remoteHostName, hostname)
+                    && Objects.equals(remotePort, port)
+                    && Objects.equals(remoteUsername, username)
+                    && Objects.equals(remotePassword, password)) {
+                // The key things match so we can keep our current session
                 resetWorkingDirectory();
                 return client;
             } else {
@@ -548,6 +571,9 @@ public class FTPTransfer implements FileTransfer {
         final Map<String, String> attributes = flowFile == null ? Collections.emptyMap() : flowFile.getAttributes();
         client = createClient(ctx, attributes);
         remoteHostName = hostname;
+        remotePort = port;
+        remoteUsername = username;
+        remotePassword = password;
         closed = false;
         homeDirectory = client.printWorkingDirectory();
         return client;
@@ -606,5 +632,4 @@ public class FTPTransfer implements FileTransfer {
             return componentProxyConfig;
         };
     }
-
 }

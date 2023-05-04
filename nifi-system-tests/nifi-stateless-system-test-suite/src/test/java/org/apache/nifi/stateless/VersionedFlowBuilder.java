@@ -43,8 +43,8 @@ import java.util.Set;
 import java.util.UUID;
 
 public class VersionedFlowBuilder {
-    private VersionedFlowSnapshot flowSnapshot;
-    private VersionedProcessGroup rootGroup;
+    private final VersionedFlowSnapshot flowSnapshot;
+    private final VersionedProcessGroup rootGroup;
 
     public VersionedFlowBuilder() {
          rootGroup = new VersionedProcessGroup();
@@ -146,7 +146,7 @@ public class VersionedFlowBuilder {
         processor.setSchedulingStrategy("TIMER_DRIVEN");
         processor.setRetryCount(0);
         processor.setBackoffMechanism("PENALIZE_FLOWFILE");
-        processor.setRetriedRelationships(Collections.EMPTY_SET);
+        processor.setRetriedRelationships(Collections.emptySet());
         processor.setMaxBackoffPeriod("0 sec");
 
         group.getProcessors().add(processor);
@@ -226,6 +226,7 @@ public class VersionedFlowBuilder {
         service.setGroupIdentifier(group.getIdentifier());
         service.setIdentifier(UUID.randomUUID().toString());
         service.setName(type);
+        service.setBulletinLevel("WARN");
         service.setPosition(new Position(0, 0));
         service.setProperties(new HashMap<>());
         service.setPropertyDescriptors(new HashMap<>());

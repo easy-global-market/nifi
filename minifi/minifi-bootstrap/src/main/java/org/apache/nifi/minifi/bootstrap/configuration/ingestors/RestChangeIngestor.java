@@ -17,52 +17,59 @@
 
 package org.apache.nifi.minifi.bootstrap.configuration.ingestors;
 
-import org.apache.commons.io.input.TeeInputStream;
-import org.apache.commons.io.output.ByteArrayOutputStream;
-import org.apache.nifi.minifi.bootstrap.ConfigurationFileHolder;
-import org.apache.nifi.minifi.bootstrap.configuration.ConfigurationChangeNotifier;
-import org.apache.nifi.minifi.bootstrap.configuration.ListenerHandleResult;
-import org.apache.nifi.minifi.bootstrap.configuration.differentiators.WholeConfigDifferentiator;
-import org.apache.nifi.minifi.bootstrap.configuration.differentiators.interfaces.Differentiator;
-import org.apache.nifi.minifi.bootstrap.configuration.ingestors.interfaces.ChangeIngestor;
-import org.eclipse.jetty.server.Request;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.server.handler.AbstractHandler;
-import org.eclipse.jetty.server.handler.HandlerCollection;
-import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.util.thread.QueuedThreadPool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.apache.nifi.minifi.bootstrap.configuration.ConfigurationChangeCoordinator.NOTIFIER_INGESTORS_KEY;
+import static org.apache.nifi.minifi.bootstrap.configuration.differentiators.WholeConfigDifferentiator.WHOLE_CONFIG_KEY;
 
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.PrintWriter;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.security.KeyStore;
+import java.security.Security;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Supplier;
-
-import static org.apache.nifi.minifi.bootstrap.configuration.ConfigurationChangeCoordinator.NOTIFIER_INGESTORS_KEY;
-import static org.apache.nifi.minifi.bootstrap.configuration.differentiators.WholeConfigDifferentiator.WHOLE_CONFIG_KEY;
+import javax.net.ssl.SSLContext;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import org.apache.commons.io.IOUtils;
+import org.apache.nifi.jetty.configuration.connector.StandardServerConnectorFactory;
+import org.apache.nifi.minifi.bootstrap.ConfigurationFileHolder;
+import org.apache.nifi.minifi.bootstrap.configuration.ConfigurationChangeNotifier;
+import org.apache.nifi.minifi.bootstrap.configuration.ListenerHandleResult;
+import org.apache.nifi.minifi.bootstrap.configuration.differentiators.Differentiator;
+import org.apache.nifi.minifi.bootstrap.configuration.differentiators.WholeConfigDifferentiator;
+import org.apache.nifi.minifi.bootstrap.configuration.ingestors.interfaces.ChangeIngestor;
+import org.apache.nifi.minifi.bootstrap.util.ConfigTransformer;
+import org.apache.nifi.security.ssl.StandardKeyStoreBuilder;
+import org.apache.nifi.security.ssl.StandardSslContextBuilder;
+import org.apache.nifi.security.util.TlsPlatform;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.server.handler.HandlerCollection;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 public class RestChangeIngestor implements ChangeIngestor {
 
-    private static final Map<String, Supplier<Differentiator<InputStream>>> DIFFERENTIATOR_CONSTRUCTOR_MAP;
+    private static final Map<String, Supplier<Differentiator<ByteBuffer>>> DIFFERENTIATOR_CONSTRUCTOR_MAP;
 
     static {
-        HashMap<String, Supplier<Differentiator<InputStream>>> tempMap = new HashMap<>();
-        tempMap.put(WHOLE_CONFIG_KEY, WholeConfigDifferentiator::getInputStreamDifferentiator);
+        HashMap<String, Supplier<Differentiator<ByteBuffer>>> tempMap = new HashMap<>();
+        tempMap.put(WHOLE_CONFIG_KEY, WholeConfigDifferentiator::getByteBufferDifferentiator);
 
         DIFFERENTIATOR_CONSTRUCTOR_MAP = Collections.unmodifiableMap(tempMap);
+        Security.addProvider(new BouncyCastleProvider());
     }
 
 
@@ -86,8 +93,10 @@ public class RestChangeIngestor implements ChangeIngestor {
     public static final String DIFFERENTIATOR_KEY = RECEIVE_HTTP_BASE_KEY + ".differentiator";
     private final Server jetty;
 
-    private volatile Differentiator<InputStream> differentiator;
+    private volatile Differentiator<ByteBuffer> differentiator;
     private volatile ConfigurationChangeNotifier configurationChangeNotifier;
+    private volatile ConfigurationFileHolder configurationFileHolder;
+    private volatile Properties properties;
 
     public RestChangeIngestor() {
         QueuedThreadPool queuedThreadPool = new QueuedThreadPool();
@@ -97,21 +106,22 @@ public class RestChangeIngestor implements ChangeIngestor {
 
     @Override
     public void initialize(Properties properties, ConfigurationFileHolder configurationFileHolder, ConfigurationChangeNotifier configurationChangeNotifier) {
+        this.configurationFileHolder = configurationFileHolder;
+        this.properties = properties;
         logger.info("Initializing");
-
-        final String differentiatorName = properties.getProperty(DIFFERENTIATOR_KEY);
+        String differentiatorName = properties.getProperty(DIFFERENTIATOR_KEY);
 
         if (differentiatorName != null && !differentiatorName.isEmpty()) {
-            Supplier<Differentiator<InputStream>> differentiatorSupplier = DIFFERENTIATOR_CONSTRUCTOR_MAP.get(differentiatorName);
+            Supplier<Differentiator<ByteBuffer>> differentiatorSupplier = DIFFERENTIATOR_CONSTRUCTOR_MAP.get(differentiatorName);
             if (differentiatorSupplier == null) {
                 throw new IllegalArgumentException("Property, " + DIFFERENTIATOR_KEY + ", has value " + differentiatorName + " which does not " +
                         "correspond to any in the PullHttpChangeIngestor Map:" + DIFFERENTIATOR_CONSTRUCTOR_MAP.keySet());
             }
             differentiator = differentiatorSupplier.get();
         } else {
-            differentiator = WholeConfigDifferentiator.getInputStreamDifferentiator();
+            differentiator = WholeConfigDifferentiator.getByteBufferDifferentiator();
         }
-        differentiator.initialize(properties, configurationFileHolder);
+        differentiator.initialize(configurationFileHolder);
 
         // create the secure connector if keystore location is specified
         if (properties.getProperty(KEYSTORE_LOCATION_KEY) != null) {
@@ -132,7 +142,7 @@ public class RestChangeIngestor implements ChangeIngestor {
     public void start() {
         try {
             jetty.start();
-            logger.info("RestChangeIngester has started and is listening on port {}.", new Object[]{getPort()});
+            logger.info("RestChangeIngester has started and is listening on port {}.", getPort());
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -163,7 +173,7 @@ public class RestChangeIngestor implements ChangeIngestor {
     }
 
     private void createConnector(Properties properties) {
-        final ServerConnector http = new ServerConnector(jetty);
+        ServerConnector http = new ServerConnector(jetty);
 
         http.setPort(Integer.parseInt(properties.getProperty(PORT_KEY, "0")));
         http.setHost(properties.getProperty(HOST_KEY, "localhost"));
@@ -172,42 +182,56 @@ public class RestChangeIngestor implements ChangeIngestor {
         http.setIdleTimeout(30000L);
         jetty.addConnector(http);
 
-        logger.info("Added an http connector on the host '{}' and port '{}'", new Object[]{http.getHost(), http.getPort()});
+        logger.info("Added an http connector on the host '{}' and port '{}'", http.getHost(), http.getPort());
     }
 
     private void createSecureConnector(Properties properties) {
-        SslContextFactory ssl = new SslContextFactory();
+        KeyStore keyStore;
+        KeyStore trustStore = null;
 
-        if (properties.getProperty(KEYSTORE_LOCATION_KEY) != null) {
-            ssl.setKeyStorePath(properties.getProperty(KEYSTORE_LOCATION_KEY));
-            ssl.setKeyStorePassword(properties.getProperty(KEYSTORE_PASSWORD_KEY));
-            ssl.setKeyStoreType(properties.getProperty(KEYSTORE_TYPE_KEY));
+        try (FileInputStream keyStoreStream = new FileInputStream(properties.getProperty(KEYSTORE_LOCATION_KEY))) {
+            keyStore = new StandardKeyStoreBuilder()
+                .type(properties.getProperty(KEYSTORE_TYPE_KEY))
+                .inputStream(keyStoreStream)
+                .password(properties.getProperty(KEYSTORE_PASSWORD_KEY).toCharArray())
+                .build();
+        } catch (IOException ioe) {
+            throw new UncheckedIOException("Key Store loading failed", ioe);
         }
 
         if (properties.getProperty(TRUSTSTORE_LOCATION_KEY) != null) {
-            ssl.setTrustStorePath(properties.getProperty(TRUSTSTORE_LOCATION_KEY));
-            ssl.setTrustStorePassword(properties.getProperty(TRUSTSTORE_PASSWORD_KEY));
-            ssl.setTrustStoreType(properties.getProperty(TRUSTSTORE_TYPE_KEY));
-            ssl.setNeedClientAuth(Boolean.parseBoolean(properties.getProperty(NEED_CLIENT_AUTH_KEY, "true")));
+            try (FileInputStream trustStoreStream = new FileInputStream(properties.getProperty(TRUSTSTORE_LOCATION_KEY))) {
+                trustStore = new StandardKeyStoreBuilder()
+                    .type(properties.getProperty(TRUSTSTORE_TYPE_KEY))
+                    .inputStream(trustStoreStream)
+                    .password(properties.getProperty(TRUSTSTORE_PASSWORD_KEY).toCharArray())
+                    .build();
+            } catch (IOException ioe) {
+                throw new UncheckedIOException("Trust Store loading failed", ioe);
+            }
         }
 
-        // build the connector
-        final ServerConnector https = new ServerConnector(jetty, ssl);
+        SSLContext sslContext = new StandardSslContextBuilder()
+            .keyStore(keyStore)
+            .keyPassword(properties.getProperty(KEYSTORE_PASSWORD_KEY).toCharArray())
+            .trustStore(trustStore)
+            .build();
 
-        // set host and port
-        https.setPort(Integer.parseInt(properties.getProperty(PORT_KEY, "0")));
+        StandardServerConnectorFactory serverConnectorFactory = new StandardServerConnectorFactory(jetty, Integer.parseInt(properties.getProperty(PORT_KEY, "0")));
+        serverConnectorFactory.setNeedClientAuth(Boolean.parseBoolean(properties.getProperty(NEED_CLIENT_AUTH_KEY, "true")));
+        serverConnectorFactory.setSslContext(sslContext);
+        serverConnectorFactory.setIncludeSecurityProtocols(TlsPlatform.getPreferredProtocols().toArray(new String[0]));
+
+        ServerConnector https = serverConnectorFactory.getServerConnector();
         https.setHost(properties.getProperty(HOST_KEY, "localhost"));
-
-        // Severely taxed environments may have significant delays when executing.
-        https.setIdleTimeout(30000L);
 
         // add the connector
         jetty.addConnector(https);
 
-        logger.info("Added an https connector on the host '{}' and port '{}'", new Object[]{https.getHost(), https.getPort()});
+        logger.info("HTTPS Connector added for Host [{}] and Port [{}]", https.getHost(), https.getPort());
     }
 
-    protected void setDifferentiator(Differentiator<InputStream> differentiator) {
+    protected void setDifferentiator(Differentiator<ByteBuffer> differentiator) {
         this.differentiator = differentiator;
     }
 
@@ -215,7 +239,7 @@ public class RestChangeIngestor implements ChangeIngestor {
 
         @Override
         public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
-                throws IOException, ServletException {
+                throws IOException {
 
             logRequest(request);
 
@@ -224,17 +248,12 @@ public class RestChangeIngestor implements ChangeIngestor {
             if (POST.equals(request.getMethod())) {
                 int statusCode;
                 String responseText;
-                try (ByteArrayOutputStream pipedOutputStream = new ByteArrayOutputStream();
-                     TeeInputStream teeInputStream = new TeeInputStream(request.getInputStream(), pipedOutputStream)) {
+                try {
+                    ByteBuffer readOnlyNewConfig =
+                        ConfigTransformer.overrideNonFlowSectionsFromOriginalSchema(
+                            IOUtils.toByteArray(request.getInputStream()), configurationFileHolder.getConfigFileReference().get().duplicate(), properties);
 
-                    if (differentiator.isNew(teeInputStream)) {
-                        // Fill the pipedOutputStream with the rest of the request data
-                        while (teeInputStream.available() != 0) {
-                            teeInputStream.read();
-                        }
-
-                        ByteBuffer newConfig = ByteBuffer.wrap(pipedOutputStream.toByteArray());
-                        ByteBuffer readOnlyNewConfig = newConfig.asReadOnlyBuffer();
+                    if (differentiator.isNew(readOnlyNewConfig)) {
 
                         Collection<ListenerHandleResult> listenerHandleResults = configurationChangeNotifier.notifyListeners(readOnlyNewConfig);
 
@@ -250,9 +269,13 @@ public class RestChangeIngestor implements ChangeIngestor {
                         statusCode = 409;
                         responseText = "Request received but instance is already running this config.";
                     }
-
-                    writeOutput(response, responseText, statusCode);
+                } catch (Exception e) {
+                    logger.error("Failed to override config file", e);
+                    statusCode = 500;
+                    responseText = "Failed to override config file";
                 }
+
+                writeOutput(response, responseText, statusCode);
             } else if (GET.equals(request.getMethod())) {
                 writeOutput(response, GET_TEXT, 200);
             } else {

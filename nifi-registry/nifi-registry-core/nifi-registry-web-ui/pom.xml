@@ -19,11 +19,11 @@
     <parent>
         <groupId>org.apache.nifi.registry</groupId>
         <artifactId>nifi-registry-core</artifactId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
     <groupId>org.apache.nifi.registry</groupId>
     <artifactId>nifi-registry-web-ui</artifactId>
-    <version>1.16.0-SNAPSHOT</version>
+    <version>1.21.0</version>
     <packaging>war</packaging>
     <properties>
         <frontend.source>${basedir}/src/main</frontend.source>
@@ -47,7 +47,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-war-plugin</artifactId>
-                <version>2.5</version>
+                <version>3.3.2</version>
                 <configuration>
                     <!--
                         By default the maven-war-plugin automatically includes everything

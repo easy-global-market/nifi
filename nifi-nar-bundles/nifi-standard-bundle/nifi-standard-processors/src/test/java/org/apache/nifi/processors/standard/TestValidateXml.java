@@ -16,14 +16,17 @@
  */
 package org.apache.nifi.processors.standard;
 
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestValidateXml {
 
@@ -55,6 +58,7 @@ public class TestValidateXml {
 
         runner.assertAllFlowFilesTransferred(ValidateXml.REL_INVALID, 1);
         runner.assertAllFlowFilesContainAttribute(ValidateXml.REL_INVALID, ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertErrorAttributeContainsStableErrorKeyword(runner);
 
         runner.clearTransferState();
         runner.enqueue(NONCOMPLIANT_XML);
@@ -63,6 +67,12 @@ public class TestValidateXml {
 
         runner.assertAllFlowFilesTransferred(ValidateXml.REL_INVALID, 1);
         runner.assertAllFlowFilesContainAttribute(ValidateXml.REL_INVALID, ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertErrorAttributeContainsStableErrorKeyword(runner);
+    }
+
+    private void assertErrorAttributeContainsStableErrorKeyword(TestRunner runner) {
+        String errorAttribute = runner.getFlowFilesForRelationship(ValidateXml.REL_INVALID).get(0).getAttribute(ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertTrue(errorAttribute.contains("lineNumber"));
     }
 
     @Test
@@ -77,16 +87,15 @@ public class TestValidateXml {
         runner.assertAllFlowFilesTransferred(ValidateXml.REL_VALID, 1);
     }
 
-    @Test(expected = AssertionError.class)
+    @Test
     public void testInvalidEL() {
         final TestRunner runner = TestRunners.newTestRunner(new ValidateXml());
         runner.setProperty(ValidateXml.SCHEMA_FILE, "${my.schema}");
 
         runner.enqueue(INVALID_XML);
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(ValidateXml.REL_INVALID, 1);
-        runner.assertAllFlowFilesContainAttribute(ValidateXml.REL_INVALID, ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertThrows(AssertionError.class, () -> {
+            runner.run();
+        });
     }
 
     @Test
@@ -118,6 +127,7 @@ public class TestValidateXml {
 
         runner.assertAllFlowFilesTransferred(ValidateXml.REL_INVALID, 1);
         runner.assertAllFlowFilesContainAttribute(ValidateXml.REL_INVALID, ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertErrorAttributeContainsStableErrorKeyword(runner);
 
         runner.clearTransferState();
         attributes.clear();
@@ -128,6 +138,7 @@ public class TestValidateXml {
 
         runner.assertAllFlowFilesTransferred(ValidateXml.REL_INVALID, 1);
         runner.assertAllFlowFilesContainAttribute(ValidateXml.REL_INVALID, ValidateXml.ERROR_ATTRIBUTE_KEY);
+        assertErrorAttributeContainsStableErrorKeyword(runner);
     }
 
     @Test

@@ -40,6 +40,7 @@ import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.provenance.ProvenanceEventRecord;
+import org.apache.nifi.provenance.ProvenanceEventType;
 import org.apache.nifi.registry.VariableDescriptor;
 import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.state.MockStateManager;
@@ -69,8 +70,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toSet;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class StandardProcessorTestRunner implements TestRunner {
 
@@ -182,7 +186,7 @@ public class StandardProcessorTestRunner implements TestRunner {
 
     @Override
     public void run(final int iterations, final boolean stopOnFinish, final boolean initialize) {
-        run(iterations, stopOnFinish, initialize, 5000);
+        run(iterations, stopOnFinish, initialize, 5000 + iterations * runSchedule);
     }
 
     @Override
@@ -202,8 +206,7 @@ public class StandardProcessorTestRunner implements TestRunner {
                 try {
                     ReflectionUtils.invokeMethodsWithAnnotation(OnScheduled.class, processor, context);
                 } catch (final Exception e) {
-                    e.printStackTrace();
-                    Assertions.fail("Could not invoke methods annotated with @OnScheduled annotation due to: " + e);
+                    Assertions.fail("Could not invoke methods annotated with @OnScheduled annotation due to: " + e, e);
                 }
             }
 
@@ -347,6 +350,39 @@ public class StandardProcessorTestRunner implements TestRunner {
         for (final MockProcessSession session : sessionFactory.getCreatedSessions()) {
             session.assertAllFlowFiles(relationship, validator);
         }
+    }
+
+    @Override
+    public void assertAttributes(
+        Relationship relationship,
+        Set<String> checkedAttributeNames,
+        Set<Map<String, String>> expectedAttributes
+    ) {
+        assertTransferCount(relationship, expectedAttributes.size());
+        List<MockFlowFile> flowFiles = getFlowFilesForRelationship(relationship);
+
+        Set<Map<String, String>> actualAttributes = flowFiles.stream()
+            .map(flowFile -> flowFile.getAttributes().entrySet().stream()
+                .filter(attributeNameAndValue -> checkedAttributeNames.contains(attributeNameAndValue.getKey()))
+                .filter(entry -> entry.getKey() != null && entry.getValue() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))
+
+            )
+            .collect(toSet());
+
+        assertEquals(expectedAttributes, actualAttributes);
+    }
+
+    @Override
+    public void assertContents(Relationship relationship, List<String> expectedContent) {
+        assertTransferCount(relationship, expectedContent.size());
+        List<MockFlowFile> flowFiles = getFlowFilesForRelationship(relationship);
+
+        List<String> actualContent = flowFiles.stream()
+            .map(flowFile -> flowFile.getContent())
+            .collect(Collectors.toList());
+
+        assertEquals(expectedContent, actualContent);
     }
 
     @Override
@@ -686,7 +722,10 @@ public class StandardProcessorTestRunner implements TestRunner {
         }
 
         try {
-            ReflectionUtils.invokeMethodsWithAnnotation(OnDisabled.class, service);
+            // Create a config context to pass into the controller service's OnDisabled method (it will be ignored if the controller service has no arguments)
+            final MockConfigurationContext configContext = new MockConfigurationContext(service, configuration.getProperties(), context, variableRegistry);
+            configContext.setValidateExpressions(validateExpressionUsage);
+            ReflectionUtils.invokeMethodsWithAnnotation(OnDisabled.class, service, configContext);
         } catch (final Exception e) {
             e.printStackTrace();
             Assertions.fail("Failed to disable Controller Service " + service + " due to " + e);
@@ -1017,5 +1056,14 @@ public class StandardProcessorTestRunner implements TestRunner {
     @Override
     public void setRunSchedule(long runSchedule) {
         this.runSchedule = runSchedule;
+    }
+
+    @Override
+    public void assertProvenanceEvent(final ProvenanceEventType eventType) {
+        Set<ProvenanceEventType> expectedEventTypes = Collections.singleton(eventType);
+        Set<ProvenanceEventType> actualEventTypes = getProvenanceEvents().stream()
+                        .map(ProvenanceEventRecord::getEventType)
+                        .collect(toSet());
+        assertEquals(expectedEventTypes, actualEventTypes);
     }
 }

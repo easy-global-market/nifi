@@ -17,16 +17,12 @@
     <parent>
         <artifactId>nifi</artifactId>
         <groupId>org.apache.nifi</groupId>
-        <version>1.16.0-SNAPSHOT</version>
+        <version>1.21.0</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>nifi-stateless</artifactId>
     <packaging>pom</packaging>
-
-    <properties>
-        <jersey.version>2.33</jersey.version>
-    </properties>
 
     <modules>
         <module>nifi-stateless-api</module>
@@ -35,5 +31,4 @@
         <module>nifi-stateless-resources</module>
         <module>nifi-stateless-assembly</module>
     </modules>
-
 </project>

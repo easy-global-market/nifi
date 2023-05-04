@@ -22,6 +22,9 @@ import org.apache.nifi.toolkit.cli.impl.client.nifi.ProcessGroupClient;
 import org.apache.nifi.toolkit.cli.impl.client.nifi.RequestConfig;
 import org.apache.nifi.web.api.dto.TemplateDTO;
 import org.apache.nifi.web.api.entity.ControllerServiceEntity;
+import org.apache.nifi.web.api.entity.CopySnippetRequestEntity;
+import org.apache.nifi.web.api.entity.FlowComparisonEntity;
+import org.apache.nifi.web.api.entity.FlowEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupImportEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupReplaceRequestEntity;
@@ -309,4 +312,41 @@ public class JerseyProcessGroupClient extends AbstractJerseyClient implements Pr
             return getRequestBuilder(target).delete(ProcessGroupReplaceRequestEntity.class);
         });
     }
+
+    @Override
+    public FlowEntity copySnippet(final String processGroupId, final CopySnippetRequestEntity copySnippetRequestEntity) throws NiFiClientException, IOException {
+        if (StringUtils.isBlank(processGroupId)) {
+            throw new IllegalArgumentException("Process group id cannot be null or blank");
+        }
+
+        if (copySnippetRequestEntity == null) {
+            throw new IllegalArgumentException("Snippet Request Entity cannot be null");
+        }
+
+        return executeAction("Error copying snippet to Process Group", () -> {
+            final WebTarget target = processGroupsTarget
+                .path("{id}/snippet-instance")
+                .resolveTemplate("id", processGroupId);
+
+            return getRequestBuilder(target).post(
+                Entity.entity(copySnippetRequestEntity, MediaType.APPLICATION_JSON_TYPE),
+                FlowEntity.class);
+        });
+    }
+
+    @Override
+    public FlowComparisonEntity getLocalModifications(final String processGroupId) throws NiFiClientException, IOException {
+        if (StringUtils.isBlank(processGroupId)) {
+            throw new IllegalArgumentException("Process group id cannot be null or blank");
+        }
+
+        return executeAction("Error retrieving list of local flow modifications", () -> {
+            final WebTarget target = processGroupsTarget
+                .path("{id}/local-modifications")
+                .resolveTemplate("id", processGroupId);
+
+            return getRequestBuilder(target).get(FlowComparisonEntity.class);
+        });
+    }
+
 }

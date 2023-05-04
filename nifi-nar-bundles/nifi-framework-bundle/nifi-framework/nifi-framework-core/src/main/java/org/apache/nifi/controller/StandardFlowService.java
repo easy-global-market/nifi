@@ -54,7 +54,6 @@ import org.apache.nifi.controller.serialization.FlowSerializationException;
 import org.apache.nifi.controller.serialization.FlowSynchronizationException;
 import org.apache.nifi.controller.serialization.StandardFlowSynchronizer;
 import org.apache.nifi.controller.status.ProcessGroupStatus;
-import org.apache.nifi.encrypt.PropertyEncryptor;
 import org.apache.nifi.engine.FlowEngine;
 import org.apache.nifi.events.BulletinFactory;
 import org.apache.nifi.groups.BundleUpdateStrategy;
@@ -157,11 +156,12 @@ public class StandardFlowService implements FlowService, ProtocolHandler {
     public static StandardFlowService createStandaloneInstance(
             final FlowController controller,
             final NiFiProperties nifiProperties,
-            final PropertyEncryptor encryptor,
             final RevisionManager revisionManager,
-            final Authorizer authorizer) throws IOException {
+            final Authorizer authorizer,
+            final FlowSerializationStrategy serializationStrategy) throws IOException {
 
-        return new StandardFlowService(controller, nifiProperties, null, encryptor, false, null, revisionManager, authorizer);
+        return new StandardFlowService(controller, nifiProperties, null, false, null, revisionManager, authorizer,
+                serializationStrategy);
     }
 
     public static StandardFlowService createClusteredInstance(
@@ -169,30 +169,31 @@ public class StandardFlowService implements FlowService, ProtocolHandler {
             final NiFiProperties nifiProperties,
             final NodeProtocolSenderListener senderListener,
             final ClusterCoordinator coordinator,
-            final PropertyEncryptor encryptor,
             final RevisionManager revisionManager,
             final Authorizer authorizer) throws IOException {
 
-        return new StandardFlowService(controller, nifiProperties, senderListener, encryptor, true, coordinator, revisionManager, authorizer);
+        return new StandardFlowService(controller, nifiProperties, senderListener, true, coordinator, revisionManager, authorizer,
+                FlowSerializationStrategy.WRITE_XML_AND_JSON);
     }
 
     private StandardFlowService(
             final FlowController controller,
             final NiFiProperties nifiProperties,
             final NodeProtocolSenderListener senderListener,
-            final PropertyEncryptor encryptor,
             final boolean configuredForClustering,
             final ClusterCoordinator clusterCoordinator,
             final RevisionManager revisionManager,
-            final Authorizer authorizer) throws IOException {
+            final Authorizer authorizer,
+            final FlowSerializationStrategy serializationStrategy) throws IOException {
 
         this.nifiProperties = nifiProperties;
         this.controller = controller;
 
+
         gracefulShutdownSeconds = (int) FormatUtils.getTimeDuration(nifiProperties.getProperty(NiFiProperties.FLOW_CONTROLLER_GRACEFUL_SHUTDOWN_PERIOD), TimeUnit.SECONDS);
         autoResumeState = nifiProperties.getAutoResumeState();
 
-        dao = new StandardFlowConfigurationDAO(encryptor, nifiProperties, controller.getExtensionManager());
+        dao = new StandardFlowConfigurationDAO(nifiProperties, controller.getExtensionManager(), serializationStrategy);
         this.clusterCoordinator = clusterCoordinator;
         if (clusterCoordinator != null) {
             clusterCoordinator.setFlowService(this);
@@ -232,7 +233,6 @@ public class StandardFlowService implements FlowService, ProtocolHandler {
             this.configuredForClustering = false;
             this.senderListener = null;
         }
-
     }
 
     @Override
@@ -619,6 +619,8 @@ public class StandardFlowService implements FlowService, ProtocolHandler {
         flowManager.getRootGroup().findAllProcessors().stream().filter(AbstractComponentNode::isExtensionMissing).forEach(p -> missingComponents.add(p.getIdentifier()));
         flowManager.getAllControllerServices().stream().filter(ComponentNode::isExtensionMissing).forEach(cs -> missingComponents.add(cs.getIdentifier()));
         controller.getAllReportingTasks().stream().filter(ComponentNode::isExtensionMissing).forEach(r -> missingComponents.add(r.getIdentifier()));
+        controller.getFlowManager().getAllParameterProviders().stream().filter(ComponentNode::isExtensionMissing).forEach(r -> missingComponents.add(r.getIdentifier()));
+        controller.getFlowManager().getAllFlowRegistryClients().stream().filter(ComponentNode::isExtensionMissing).forEach(c -> missingComponents.add(c.getIdentifier()));
 
         return new StandardDataFlow(flowBytes, snippetBytes, authorizerFingerprint, missingComponents);
     }

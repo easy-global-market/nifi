@@ -17,21 +17,22 @@
 package org.apache.nifi.controller.status.history;
 
 import org.apache.nifi.controller.status.ProcessGroupStatus;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class EmbeddedQuestDbStatusHistoryRepositoryForNodeTest extends AbstractEmbeddedQuestDbStatusHistoryRepositoryTest {
 
     @Test
-    public void testReadingEmptyRepository() throws Exception {
+    public void testReadingEmptyRepository() {
         // when
         final StatusHistory nodeStatusHistory = testSubject.getNodeStatusHistory(START, END);
         final GarbageCollectionHistory garbageCollectionHistory = testSubject.getGarbageCollectionHistory(START, END);
 
         // then
-        Assert.assertTrue(nodeStatusHistory.getStatusSnapshots().isEmpty());
-        Assert.assertTrue(garbageCollectionHistory.getGarbageCollectionStatuses("gc1").isEmpty());
-        Assert.assertTrue(garbageCollectionHistory.getGarbageCollectionStatuses("gc2").isEmpty());
+        assertTrue(nodeStatusHistory.getStatusSnapshots().isEmpty());
+        assertTrue(garbageCollectionHistory.getGarbageCollectionStatuses("gc1").isEmpty());
+        assertTrue(garbageCollectionHistory.getGarbageCollectionStatuses("gc2").isEmpty());
     }
 
     @Test

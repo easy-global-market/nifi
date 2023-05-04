@@ -91,6 +91,7 @@ fragment EXP : ('e'|'E') ('+'|'-')? ('0'..'9')+ ;
 
 TRUE	: 'true';
 FALSE	: 'false';
+NULL    : 'null';
 
 //
 // FUNCTION NAMES
@@ -111,6 +112,7 @@ UUID : 'UUID';
 HOSTNAME : 'hostname';	// requires boolean arg: prefer FQDN
 NOW	: 'now';
 THREAD : 'thread';
+GET_URI : 'getUri';
 
 
 // 0 arg functions
@@ -124,6 +126,8 @@ IS_EMPTY : 'isEmpty';
 NOT_NULL : 'notNull';
 TO_NUMBER : 'toNumber';
 TO_DECIMAL : 'toDecimal';
+TO_MICROS : 'toMicros';
+TO_NANOS : 'toNanos';
 URL_ENCODE : 'urlEncode';
 URL_DECODE : 'urlDecode';
 NOT : 'not';
@@ -143,6 +147,7 @@ BASE64_ENCODE : 'base64Encode';
 BASE64_DECODE : 'base64Decode';
 GET_STATE_VALUE: 'getStateValue';
 EVALUATE_EL_STRING: 'evaluateELString';
+IS_JSON: 'isJson';
 
 // 1 arg functions
 SUBSTRING_AFTER	: 'substringAfter';
@@ -167,7 +172,9 @@ LESS_THAN		: 'lt';
 GREATER_THAN_OR_EQUAL	: 'ge';
 LESS_THAN_OR_EQUAL		: 'le';
 FORMAT			: 'format'; // takes string date format; uses SimpleDateFormat
+FORMAT_INSTANT  : 'formatInstant';
 TO_DATE			: 'toDate'; // takes string date format; converts the subject to a Long based on the date format
+TO_INSTANT		: 'toInstant';
 MOD : 'mod';
 PLUS : 'plus';
 MINUS : 'minus';

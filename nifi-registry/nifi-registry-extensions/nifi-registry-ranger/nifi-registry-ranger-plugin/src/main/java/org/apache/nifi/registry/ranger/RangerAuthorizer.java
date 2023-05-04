@@ -39,6 +39,11 @@ import org.apache.nifi.registry.security.authorization.exception.AuthorizationAc
 import org.apache.nifi.registry.security.authorization.exception.UninheritableAuthorizationsException;
 import org.apache.nifi.registry.security.exception.SecurityProviderCreationException;
 import org.apache.nifi.registry.util.PropertyValue;
+import org.apache.nifi.xml.processing.ProcessingException;
+import org.apache.nifi.xml.processing.parsers.DocumentProvider;
+import org.apache.nifi.xml.processing.parsers.StandardDocumentProvider;
+import org.apache.nifi.xml.processing.transform.StandardTransformProvider;
+import org.apache.nifi.xml.processing.transform.TransformProvider;
 import org.apache.ranger.audit.model.AuthzAuditEvent;
 import org.apache.ranger.authorization.hadoop.config.RangerConfiguration;
 import org.apache.ranger.authorization.hadoop.config.RangerPluginConfig;
@@ -52,14 +57,7 @@ import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
-import org.xml.sax.SAXException;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerException;
-import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.ByteArrayInputStream;
@@ -69,9 +67,12 @@ import java.io.StringWriter;
 import java.net.MalformedURLException;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Authorizer implementation that uses Apache Ranger to make authorization decisions.
@@ -80,8 +81,6 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
 
     private static final Logger logger = LoggerFactory.getLogger(RangerAuthorizer.class);
 
-    private static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
-
     private static final String USER_GROUP_PROVIDER_ELEMENT = "userGroupProvider";
 
     static final String USER_GROUP_PROVIDER = "User Group Provider";
@@ -89,9 +88,10 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
     static final String RANGER_AUDIT_PATH_PROP = "Ranger Audit Config Path";
     static final String RANGER_SECURITY_PATH_PROP = "Ranger Security Config Path";
     static final String RANGER_KERBEROS_ENABLED_PROP = "Ranger Kerberos Enabled";
-    static final String RANGER_ADMIN_IDENTITY_PROP = "Ranger Admin Identity";
     static final String RANGER_SERVICE_TYPE_PROP = "Ranger Service Type";
     static final String RANGER_APP_ID_PROP = "Ranger Application Id";
+    static final String RANGER_ADMIN_IDENTITY_PROP_PREFIX = "Ranger Admin Identity";
+    static final Pattern RANGER_ADMIN_IDENTITY_PATTERN = Pattern.compile(RANGER_ADMIN_IDENTITY_PROP_PREFIX + "\\s?\\S*");
 
     static final String RANGER_NIFI_REG_RESOURCE_NAME = "nifi-registry-resource";
     private static final String DEFAULT_SERVICE_TYPE = "nifi-registry";
@@ -104,7 +104,7 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
 
     private volatile RangerBasePluginWithPolicies rangerPlugin = null;
     private volatile RangerDefaultAuditHandler defaultAuditHandler = null;
-    private volatile String rangerAdminIdentity = null;
+    private volatile Set<String> rangerAdminIdentity = null;
     private volatile NiFiRegistryProperties registryProperties;
 
     private UserGroupProviderLookup userGroupProviderLookup;
@@ -169,7 +169,7 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
                 rangerPlugin.init();
 
                 defaultAuditHandler = new RangerDefaultAuditHandler();
-                rangerAdminIdentity = getConfigValue(configurationContext, RANGER_ADMIN_IDENTITY_PROP, null);
+                rangerAdminIdentity = getConfigValues(configurationContext, RANGER_ADMIN_IDENTITY_PATTERN, null);
 
             } else {
                 logger.info("base plugin already initialized");
@@ -189,9 +189,9 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
         final Set<String> userGroups = request.getGroups();
         final String resourceIdentifier = request.getResource().getIdentifier();
 
-        // if a ranger admin identity was provided, and it equals the identity making the request,
+        // if a ranger admin identity was provided, and it contains the identity making the request,
         // and the request is to retrieve the resources, then allow it through
-        if (StringUtils.isNotBlank(rangerAdminIdentity) && rangerAdminIdentity.equals(identity)
+        if (rangerAdminIdentity != null && rangerAdminIdentity.contains(identity)
                 && resourceIdentifier.equals(RESOURCES_RESOURCE)) {
             return AuthorizationResult.approved();
         }
@@ -321,13 +321,30 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
         return retValue;
     }
 
+    private Set<String> getConfigValues(final AuthorizerConfigurationContext context, final Pattern namePattern, final String defaultValue) {
+        final Set<String> configValues = new HashSet<>();
+
+        for (Map.Entry<String,String> entry : context.getProperties().entrySet()) {
+            Matcher matcher = namePattern.matcher(entry.getKey());
+            if (matcher.matches() && !StringUtils.isBlank(entry.getValue())) {
+                configValues.add(entry.getValue());
+            }
+        }
+
+        if (configValues.isEmpty() && (defaultValue != null)) {
+            configValues.add(defaultValue);
+        }
+
+        return configValues;
+    }
+
     @Override
     public String getFingerprint() throws AuthorizationAccessException {
         final StringWriter out = new StringWriter();
         try {
             // create the document
-            final DocumentBuilder documentBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
-            final Document document = documentBuilder.newDocument();
+            final DocumentProvider documentProvider = new StandardDocumentProvider();
+            final Document document = documentProvider.newDocument();
 
             // create the root element
             final Element managedRangerAuthorizationsElement = document.createElement("managedRangerAuthorizations");
@@ -342,9 +359,9 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
                 userGroupProviderElement.appendChild(document.createTextNode(((ConfigurableUserGroupProvider) userGroupProvider).getFingerprint()));
             }
 
-            final Transformer transformer = TransformerFactory.newInstance().newTransformer();
-            transformer.transform(new DOMSource(document), new StreamResult(out));
-        } catch (ParserConfigurationException | TransformerException e) {
+            final TransformProvider transformProvider = new StandardTransformProvider();
+            transformProvider.transform(new DOMSource(document), new StreamResult(out));
+        } catch (final ProcessingException e) {
             throw new AuthorizationAccessException("Unable to generate fingerprint", e);
         }
 
@@ -355,8 +372,8 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
 
         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
-            final Document document = docBuilder.parse(in);
+            final DocumentProvider documentProvider = new  StandardDocumentProvider();
+            final Document document = documentProvider.parse(in);
             final Element rootElement = document.getDocumentElement();
 
             final NodeList userGroupProviderList = rootElement.getElementsByTagName(USER_GROUP_PROVIDER_ELEMENT);
@@ -366,7 +383,7 @@ public class RangerAuthorizer implements ManagedAuthorizer, AuthorizationAuditor
 
             final Node userGroupProvider = userGroupProviderList.item(0);
             return userGroupProvider.getTextContent();
-        } catch (SAXException | ParserConfigurationException | IOException e) {
+        } catch (final ProcessingException | IOException e) {
             throw new AuthorizationAccessException("Unable to parse fingerprint", e);
         }
     }

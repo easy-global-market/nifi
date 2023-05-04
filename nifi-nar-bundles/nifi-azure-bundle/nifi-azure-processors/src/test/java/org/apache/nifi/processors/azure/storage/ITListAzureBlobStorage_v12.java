@@ -19,10 +19,12 @@ package org.apache.nifi.processors.azure.storage;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processors.azure.storage.utils.AzureStorageUtils;
+import org.apache.nifi.processors.azure.storage.utils.BlobAttributes;
 import org.apache.nifi.serialization.record.MockRecordWriter;
 import org.apache.nifi.util.MockFlowFile;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -48,6 +50,17 @@ public class ITListAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT {
     @Test
     public void testListBlobs() throws Exception {
         uploadBlobs();
+
+        runProcessor();
+
+        assertSuccess(BLOB_NAME_1, BLOB_NAME_2, BLOB_NAME_3, BLOB_NAME_4);
+    }
+
+    @Test
+    public void testListBlobsUsingProxyConfigurationService() throws Exception {
+        uploadBlobs();
+
+        configureProxyService();
 
         runProcessor();
 
@@ -112,13 +125,58 @@ public class ITListAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT {
         MockRecordWriter recordWriter = new MockRecordWriter(null, false);
         runner.addControllerService("record-writer", recordWriter);
         runner.enableControllerService(recordWriter);
-        runner.setProperty(ListAzureDataLakeStorage.RECORD_WRITER, "record-writer");
+        runner.setProperty(ListAzureBlobStorage_v12.RECORD_WRITER, "record-writer");
 
         runner.run();
 
-        runner.assertAllFlowFilesTransferred(ListAzureDataLakeStorage.REL_SUCCESS, 1);
-        MockFlowFile flowFile = runner.getFlowFilesForRelationship(ListAzureDataLakeStorage.REL_SUCCESS).get(0);
+        runner.assertAllFlowFilesTransferred(ListAzureBlobStorage_v12.REL_SUCCESS, 1);
+        MockFlowFile flowFile = runner.getFlowFilesForRelationship(ListAzureBlobStorage_v12.REL_SUCCESS).get(0);
         flowFile.assertAttributeEquals("record.count", "4");
+    }
+
+    @Test
+    public void testListWithMinAge() throws Exception {
+        uploadBlobs();
+        runner.setProperty(ListAzureBlobStorage_v12.MIN_AGE, "1 hour");
+
+        runProcessor();
+
+        runner.assertTransferCount(ListAzureBlobStorage_v12.REL_SUCCESS, 0);
+    }
+
+    @Test
+    public void testListWithMaxAge() throws Exception {
+        uploadBlobs();
+        runner.setProperty(ListAzureBlobStorage_v12.MAX_AGE, "1 hour");
+
+        runProcessor();
+
+        assertSuccess(BLOB_NAME_1, BLOB_NAME_2, BLOB_NAME_3, BLOB_NAME_4);
+    }
+
+    @Test
+    public void testListWithMinSize() throws Exception {
+        uploadBlobs();
+        runner.setProperty(ListAzureBlobStorage_v12.MIN_SIZE, "5 B");
+        uploadBlob("blob5", "Test".getBytes(StandardCharsets.UTF_8));
+
+        runProcessor();
+
+        assertSuccess(BLOB_NAME_1, BLOB_NAME_2, BLOB_NAME_3, BLOB_NAME_4);
+    }
+
+    @Test
+    public void testListWithMaxSize() throws Exception {
+        uploadBlobs();
+        runner.setProperty(ListAzureBlobStorage_v12.MAX_SIZE, "5 B");
+        uploadBlob("blob5", "Test".getBytes(StandardCharsets.UTF_8));
+
+        runProcessor();
+
+        runner.assertAllFlowFilesTransferred(ListAzureBlobStorage_v12.REL_SUCCESS, 1);
+        MockFlowFile flowFile = runner.getFlowFilesForRelationship(ListAzureBlobStorage_v12.REL_SUCCESS).get(0);
+        assertFlowFileCommonBlobAttributes(flowFile, getContainerName(), "blob5");
+        assertFlowFileResultBlobAttributes(flowFile, "Test".length());
     }
 
     private void uploadBlobs() throws Exception {
@@ -134,14 +192,14 @@ public class ITListAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT {
     }
 
     private void assertSuccess(String... blobNames) throws Exception {
-        runner.assertTransferCount(ListAzureDataLakeStorage.REL_SUCCESS, blobNames.length);
+        runner.assertTransferCount(ListAzureBlobStorage_v12.REL_SUCCESS, blobNames.length);
 
-        List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListAzureDataLakeStorage.REL_SUCCESS);
+        List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListAzureBlobStorage_v12.REL_SUCCESS);
 
         Set<String> expectedBlobNames = new HashSet<>(Arrays.asList(blobNames));
 
         for (MockFlowFile flowFile : flowFiles) {
-            String blobName = flowFile.getAttribute("azure.blobname");
+            String blobName = flowFile.getAttribute(BlobAttributes.ATTR_NAME_BLOBNAME);
             assertTrue(expectedBlobNames.remove(blobName), "Blob should not be listed: " + blobName);
 
             assertFlowFile(flowFile, blobName);
@@ -151,8 +209,8 @@ public class ITListAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT {
     }
 
     private void assertFlowFile(MockFlowFile flowFile, String blobName) throws Exception {
-        assertFlowFileBlobAttributes(flowFile, getContainerName(), blobName, BLOB_DATA.length);
-
+        assertFlowFileCommonBlobAttributes(flowFile, getContainerName(), blobName);
+        assertFlowFileResultBlobAttributes(flowFile, BLOB_DATA.length);
         flowFile.assertAttributeEquals(CoreAttributes.FILENAME.key(), blobName.substring(blobName.lastIndexOf('/') + 1));
 
         flowFile.assertContentEquals(EMPTY_CONTENT);
@@ -160,6 +218,6 @@ public class ITListAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT {
 
     private void assertFailure() {
         assertFalse(runner.getLogger().getErrorMessages().isEmpty());
-        runner.assertTransferCount(ListAzureDataLakeStorage.REL_SUCCESS, 0);
+        runner.assertTransferCount(ListAzureBlobStorage_v12.REL_SUCCESS, 0);
     }
 }

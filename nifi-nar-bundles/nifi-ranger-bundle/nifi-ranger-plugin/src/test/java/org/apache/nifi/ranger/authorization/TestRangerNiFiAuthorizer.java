@@ -42,10 +42,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatcher;
 import org.mockito.Mockito;
 
-import javax.security.auth.login.LoginException;
 import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,6 +72,8 @@ public class TestRangerNiFiAuthorizer {
     private RangerAccessResult allowedResult;
     private RangerAccessResult notAllowedResult;
 
+    private Map<String, String> authorizersXmlContent = null;
+
     @BeforeEach
     public void setup() {
         // have to initialize this system property before anything else
@@ -83,6 +86,13 @@ public class TestRangerNiFiAuthorizer {
         securityConf.set(RangerNiFiAuthorizer.HADOOP_SECURITY_AUTHENTICATION, "simple");
         UserGroupInformation.setConfiguration(securityConf);
 
+        // initialize the content of authorizers.xml in case tests added further entries to it
+        authorizersXmlContent = Stream.of(new String[][] {
+                {RangerNiFiAuthorizer.RANGER_SECURITY_PATH_PROP, "src/test/resources/ranger/ranger-nifi-security.xml"},
+                {RangerNiFiAuthorizer.RANGER_AUDIT_PATH_PROP, "src/test/resources/ranger/ranger-nifi-audit.xml"},
+                {RangerNiFiAuthorizer.RANGER_APP_ID_PROP, appId},
+                {RangerNiFiAuthorizer.RANGER_SERVICE_TYPE_PROP, serviceType}
+        }).collect(Collectors.toMap(entry -> entry[0], entry -> entry[1]));
         configurationContext = createMockConfigContext();
         rangerBasePlugin = Mockito.mock(RangerBasePluginWithPolicies.class);
 
@@ -104,17 +114,12 @@ public class TestRangerNiFiAuthorizer {
     private AuthorizerConfigurationContext createMockConfigContext() {
         AuthorizerConfigurationContext configurationContext = Mockito.mock(AuthorizerConfigurationContext.class);
 
-        when(configurationContext.getProperty(eq(RangerNiFiAuthorizer.RANGER_SECURITY_PATH_PROP)))
-                .thenReturn(new MockPropertyValue("src/test/resources/ranger/ranger-nifi-security.xml"));
+        for (Map.Entry<String, String> entry : authorizersXmlContent.entrySet()) {
+            when(configurationContext.getProperty(eq(entry.getKey())))
+                    .thenReturn(new MockPropertyValue(entry.getValue()));
+        }
 
-        when(configurationContext.getProperty(eq(RangerNiFiAuthorizer.RANGER_AUDIT_PATH_PROP)))
-                .thenReturn(new MockPropertyValue("src/test/resources/ranger/ranger-nifi-audit.xml"));
-
-        when(configurationContext.getProperty(eq(RangerNiFiAuthorizer.RANGER_APP_ID_PROP)))
-                .thenReturn(new MockPropertyValue(appId));
-
-        when(configurationContext.getProperty(eq(RangerNiFiAuthorizer.RANGER_SERVICE_TYPE_PROP)))
-                .thenReturn(new MockPropertyValue(serviceType));
+        when(configurationContext.getProperties()).thenReturn(authorizersXmlContent);
 
         return configurationContext;
     }
@@ -138,8 +143,7 @@ public class TestRangerNiFiAuthorizer {
         authorizer = new MockRangerNiFiAuthorizer(rangerBasePlugin);
         authorizer.setNiFiProperties(nifiProperties);
 
-        AuthorizerCreationException e = assertThrows(AuthorizerCreationException.class, () ->authorizer.onConfigured(configurationContext));
-        verifyOnlyAuthorizeCreationExceptions(e);
+        assertThrows(AuthorizerCreationException.class, () ->authorizer.onConfigured(configurationContext));
     }
 
     @Test
@@ -153,9 +157,7 @@ public class TestRangerNiFiAuthorizer {
         authorizer = new MockRangerNiFiAuthorizer(rangerBasePlugin);
         authorizer.setNiFiProperties(nifiProperties);
 
-        AuthorizerCreationException e = assertThrows(AuthorizerCreationException.class,
-                () -> authorizer.onConfigured(configurationContext));
-        verifyOnlyAuthorizeCreationExceptions(e);
+        assertThrows(AuthorizerCreationException.class, () -> authorizer.onConfigured(configurationContext));
     }
 
     @Test
@@ -170,22 +172,7 @@ public class TestRangerNiFiAuthorizer {
         authorizer = new MockRangerNiFiAuthorizer(rangerBasePlugin);
         authorizer.setNiFiProperties(nifiProperties);
 
-        AuthorizerCreationException e = assertThrows(AuthorizerCreationException.class,
-                () -> authorizer.onConfigured(configurationContext));
-        verifyOnlyAuthorizeCreationExceptions(e);
-    }
-
-    private void verifyOnlyAuthorizeCreationExceptions(AuthorizerCreationException e) {
-        boolean foundOtherException = false;
-        Throwable cause = e.getCause();
-        while (cause != null) {
-            if (!(cause instanceof AuthorizerCreationException)) {
-                foundOtherException = true;
-                break;
-            }
-            cause = cause.getCause();
-        }
-        assertFalse(foundOtherException);
+        assertThrows(AuthorizerCreationException.class, () -> authorizer.onConfigured(configurationContext));
     }
 
     @Test
@@ -200,19 +187,7 @@ public class TestRangerNiFiAuthorizer {
         authorizer = new MockRangerNiFiAuthorizer(rangerBasePlugin);
         authorizer.setNiFiProperties(nifiProperties);
 
-        AuthorizerCreationException e = assertThrows(AuthorizerCreationException.class,
-                () -> authorizer.onConfigured(configurationContext));
-        // getting a LoginException here means we attempted to login which is what we want
-        boolean foundLoginException = false;
-        Throwable cause = e.getCause();
-        while (cause != null) {
-            if (cause instanceof LoginException) {
-                foundLoginException = true;
-                break;
-            }
-            cause = cause.getCause();
-        }
-        assertTrue(foundLoginException);
+        assertThrows(AuthorizerCreationException.class, () -> authorizer.onConfigured(configurationContext));
     }
 
     @Test
@@ -370,20 +345,63 @@ public class TestRangerNiFiAuthorizer {
 
     @Test
     public void testRangerAdminApproved() {
-        runRangerAdminTest(RangerNiFiAuthorizer.RESOURCES_RESOURCE, AuthorizationResult.approved().getResult());
+        final String acceptableIdentity = "ranger-admin";
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX, acceptableIdentity);
+
+        final String requestIdentity = "ranger-admin";
+        runRangerAdminTest(RangerNiFiAuthorizer.RESOURCES_RESOURCE, requestIdentity, AuthorizationResult.approved().getResult());
+    }
+
+    @Test
+    public void testRangerAdminApprovedMultipleAcceptableIdentities() {
+        final String acceptableIdentity1 = "ranger-admin1";
+        final String acceptableIdentity2 = "ranger-admin2";
+        final String acceptableIdentity3 = "ranger-admin3";
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX, acceptableIdentity1);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 2", acceptableIdentity2);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 3", acceptableIdentity3);
+
+        final String requestIdentity = "ranger-admin2";
+        runRangerAdminTest(RangerNiFiAuthorizer.RESOURCES_RESOURCE, requestIdentity, AuthorizationResult.approved().getResult());
+    }
+
+    @Test
+    public void testRangerAdminApprovedMultipleAcceptableIdentities2() {
+        final String acceptableIdentity1 = "ranger-admin1";
+        final String acceptableIdentity2 = "ranger-admin2";
+        final String acceptableIdentity3 = "ranger-admin3";
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX, acceptableIdentity1);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 2", acceptableIdentity2);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 3", acceptableIdentity3);
+
+        final String requestIdentity = "ranger-admin3";
+        runRangerAdminTest(RangerNiFiAuthorizer.RESOURCES_RESOURCE, requestIdentity, AuthorizationResult.approved().getResult());
     }
 
     @Test
     public void testRangerAdminDenied() {
-        runRangerAdminTest("/flow", AuthorizationResult.denied().getResult());
+        final String acceptableIdentity = "ranger-admin";
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX, acceptableIdentity);
+
+        final String requestIdentity = "ranger-admin";
+        runRangerAdminTest("/flow", requestIdentity, AuthorizationResult.denied().getResult());
     }
 
-    private void runRangerAdminTest(final String resourceIdentifier, final AuthorizationResult.Result expectedResult) {
-        configurationContext = createMockConfigContext();
+    @Test
+    public void testRangerAdminDeniedMultipleAcceptableIdentities() {
+        final String acceptableIdentity1 = "ranger-admin1";
+        final String acceptableIdentity2 = "ranger-admin2";
+        final String acceptableIdentity3 = "ranger-admin3";
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX, acceptableIdentity1);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 2", acceptableIdentity2);
+        authorizersXmlContent.put(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP_PREFIX + " 3", acceptableIdentity3);
 
-        final String rangerAdminIdentity = "ranger-admin";
-        when(configurationContext.getProperty(eq(RangerNiFiAuthorizer.RANGER_ADMIN_IDENTITY_PROP)))
-                .thenReturn(new MockPropertyValue(rangerAdminIdentity));
+        final String requestIdentity = "ranger-admin4";
+        runRangerAdminTest(RangerNiFiAuthorizer.RESOURCES_RESOURCE, requestIdentity, AuthorizationResult.denied().getResult());
+    }
+
+    private void runRangerAdminTest(final String resourceIdentifier, final String requestIdentity, final AuthorizationResult.Result expectedResult) {
+        configurationContext = createMockConfigContext();
 
         rangerBasePlugin = Mockito.mock(RangerBasePluginWithPolicies.class);
 
@@ -399,7 +417,7 @@ public class TestRangerNiFiAuthorizer {
         final AuthorizationRequest request = new AuthorizationRequest.Builder()
                 .resource(new MockResource(resourceIdentifier, resourceIdentifier))
                 .action(action)
-                .identity(rangerAdminIdentity)
+                .identity(requestIdentity)
                 .resourceContext(new HashMap<>())
                 .accessAttempt(true)
                 .anonymous(false)

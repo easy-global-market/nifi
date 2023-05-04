@@ -24,6 +24,7 @@ import org.apache.nifi.extension.manifest.ExtensionManifest;
 import org.apache.nifi.extension.manifest.parser.ExtensionManifestParser;
 import org.apache.nifi.nar.ExtensionManager;
 import org.apache.nifi.nar.NarClassLoadersHolder;
+import org.apache.nifi.runtime.manifest.ExtensionManifestContainer;
 import org.apache.nifi.runtime.manifest.RuntimeManifestBuilder;
 import org.apache.nifi.runtime.manifest.impl.SchedulingDefaultsFactory;
 import org.apache.nifi.runtime.manifest.impl.StandardRuntimeManifestBuilder;
@@ -32,11 +33,17 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class StandardRuntimeManifestService implements RuntimeManifestService {
 
@@ -47,10 +54,19 @@ public class StandardRuntimeManifestService implements RuntimeManifestService {
 
     private final ExtensionManager extensionManager;
     private final ExtensionManifestParser extensionManifestParser;
+    private final String runtimeManifestIdentifier;
+    private final String runtimeType;
 
-    public StandardRuntimeManifestService(final ExtensionManager extensionManager, final ExtensionManifestParser extensionManifestParser) {
+    public StandardRuntimeManifestService(final ExtensionManager extensionManager, final ExtensionManifestParser extensionManifestParser,
+                                          final String runtimeManifestIdentifier, final String runtimeType) {
         this.extensionManager = extensionManager;
         this.extensionManifestParser = extensionManifestParser;
+        this.runtimeManifestIdentifier = runtimeManifestIdentifier;
+        this.runtimeType = runtimeType;
+    }
+
+    public StandardRuntimeManifestService(final ExtensionManager extensionManager, final ExtensionManifestParser extensionManifestParser) {
+        this(extensionManager, extensionManifestParser, RUNTIME_MANIFEST_IDENTIFIER, RUNTIME_TYPE);
     }
 
     @Override
@@ -68,25 +84,38 @@ public class StandardRuntimeManifestService implements RuntimeManifestService {
         buildInfo.setTimestamp(frameworkBuildDate == null ? null : frameworkBuildDate.getTime());
 
         final RuntimeManifestBuilder manifestBuilder = new StandardRuntimeManifestBuilder()
-                .identifier(RUNTIME_MANIFEST_IDENTIFIER)
-                .runtimeType(RUNTIME_TYPE)
+                .identifier(runtimeManifestIdentifier)
+                .runtimeType(runtimeType)
                 .version(buildInfo.getVersion())
                 .schedulingDefaults(SchedulingDefaultsFactory.getNifiSchedulingDefaults())
                 .buildInfo(buildInfo);
 
         for (final Bundle bundle : allBundles) {
-            getExtensionManifest(bundle).ifPresent(em -> manifestBuilder.addBundle(em));
+            getExtensionManifest(bundle).ifPresent(manifestBuilder::addBundle);
         }
 
         return manifestBuilder.build();
     }
 
-    private Optional<ExtensionManifest> getExtensionManifest(final Bundle bundle) {
+    private Optional<ExtensionManifestContainer> getExtensionManifest(final Bundle bundle) {
         final BundleDetails bundleDetails = bundle.getBundleDetails();
+        try {
+            final ExtensionManifest extensionManifest = loadExtensionManifest(bundleDetails);
+            final Map<String, String> additionalDetails = loadAdditionalDetails(bundleDetails);
+
+            final ExtensionManifestContainer container = new ExtensionManifestContainer(extensionManifest, additionalDetails);
+            return Optional.of(container);
+        } catch (final IOException e) {
+            LOGGER.error("Unable to load extension manifest for bundle [{}]", bundleDetails.getCoordinate(), e);
+            return Optional.empty();
+        }
+    }
+
+    private ExtensionManifest loadExtensionManifest(final BundleDetails bundleDetails) throws IOException {
         final File manifestFile = new File(bundleDetails.getWorkingDirectory(), "META-INF/docs/extension-manifest.xml");
         if (!manifestFile.exists()) {
-            LOGGER.warn("Unable to find extension manifest for [{}] at [{}]...", bundleDetails.getCoordinate(), manifestFile.getAbsolutePath());
-            return Optional.empty();
+            throw new FileNotFoundException("Extension manifest files does not exist for "
+                    + bundleDetails.getCoordinate() + " at " + manifestFile.getAbsolutePath());
         }
 
         try (final InputStream inputStream = new FileInputStream(manifestFile)) {
@@ -96,11 +125,43 @@ public class StandardRuntimeManifestService implements RuntimeManifestService {
             extensionManifest.setGroupId(bundleDetails.getCoordinate().getGroup());
             extensionManifest.setArtifactId(bundleDetails.getCoordinate().getId());
             extensionManifest.setVersion(bundleDetails.getCoordinate().getVersion());
-            return Optional.of(extensionManifest);
-        } catch (final IOException e) {
-            LOGGER.error("Unable to load extension manifest for bundle [{}]", bundleDetails.getCoordinate(), e);
-            return Optional.empty();
+            return extensionManifest;
         }
+    }
+
+    private Map<String, String> loadAdditionalDetails(final BundleDetails bundleDetails) {
+        final Map<String, String> additionalDetailsMap = new LinkedHashMap<>();
+
+        final File additionalDetailsDir = new File(bundleDetails.getWorkingDirectory(), "META-INF/docs/additional-details");
+        if (!additionalDetailsDir.exists()) {
+            LOGGER.debug("No additional-details directory found under [{}]", bundleDetails.getWorkingDirectory().getAbsolutePath());
+            return additionalDetailsMap;
+        }
+
+        for (final File additionalDetailsTypeDir : additionalDetailsDir.listFiles()) {
+            if (!additionalDetailsTypeDir.isDirectory()) {
+                LOGGER.debug("Skipping [{}], not a directory...", additionalDetailsTypeDir.getAbsolutePath());
+                continue;
+            }
+
+            final File additionalDetailsFile = new File(additionalDetailsTypeDir, "additionalDetails.html");
+            if (!additionalDetailsFile.exists()) {
+                LOGGER.debug("No additionalDetails.html found under [{}]", additionalDetailsTypeDir.getAbsolutePath());
+                continue;
+            }
+
+            try (final Stream<String> additionalDetailsLines = Files.lines(additionalDetailsFile.toPath())) {
+                final String typeName = additionalDetailsTypeDir.getName();
+                final String additionalDetailsContent = additionalDetailsLines.collect(Collectors.joining());
+                LOGGER.debug("Added additionalDetails for {} from {}", typeName, additionalDetailsFile.getAbsolutePath());
+                additionalDetailsMap.put(typeName, additionalDetailsContent);
+            } catch (final IOException e) {
+                throw new RuntimeException("Unable to load additional details content for "
+                        + additionalDetailsFile.getAbsolutePath() + " due to: " + e.getMessage(), e);
+            }
+        }
+
+        return additionalDetailsMap;
     }
 
     // Visible for overriding from tests

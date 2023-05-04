@@ -61,6 +61,7 @@ import org.slf4j.LoggerFactory;
 import java.net.URL;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -180,7 +181,7 @@ public class StandardProcessorDAO extends ComponentDAO implements ProcessorDAO {
                     processor.setMaxConcurrentTasks(maxTasks);
                 }
                 if (isNotNull(schedulingPeriod)) {
-                    processor.setScheduldingPeriod(schedulingPeriod);
+                    processor.setSchedulingPeriod(schedulingPeriod);
                 }
                 if (isNotNull(penaltyDuration)) {
                     processor.setPenalizationPeriod(penaltyDuration);
@@ -198,7 +199,8 @@ public class StandardProcessorDAO extends ComponentDAO implements ProcessorDAO {
                     processor.setLossTolerant(config.isLossTolerant());
                 }
                 if (isNotNull(configProperties)) {
-                    processor.setProperties(configProperties);
+                    final Set<String> sensitiveDynamicPropertyNames = config.getSensitiveDynamicPropertyNames();
+                    processor.setProperties(configProperties, false,sensitiveDynamicPropertyNames == null ? Collections.emptySet() : sensitiveDynamicPropertyNames);
                 }
 
                 if (isNotNull(retryCount)) {
@@ -306,22 +308,25 @@ public class StandardProcessorDAO extends ComponentDAO implements ProcessorDAO {
         }
 
         // validate the scheduling period based on the scheduling strategy
-        if (isNotNull(config.getSchedulingPeriod())) {
+        final String schedulingPeriod = config.getSchedulingPeriod();
+        final String evaluatedSchedulingPeriod = processorNode.evaluateParameters(schedulingPeriod);
+
+        if (isNotNull(schedulingPeriod) && isNotNull(evaluatedSchedulingPeriod)) {
             switch (schedulingStrategy) {
                 case TIMER_DRIVEN:
                 case PRIMARY_NODE_ONLY:
-                    final Matcher schedulingMatcher = FormatUtils.TIME_DURATION_PATTERN.matcher(config.getSchedulingPeriod());
+                    final Matcher schedulingMatcher = FormatUtils.TIME_DURATION_PATTERN.matcher(evaluatedSchedulingPeriod);
                     if (!schedulingMatcher.matches()) {
                         validationErrors.add("Scheduling period is not a valid time duration (ie 30 sec, 5 min)");
                     }
                     break;
                 case CRON_DRIVEN:
                     try {
-                        new CronExpression(config.getSchedulingPeriod());
+                        new CronExpression(evaluatedSchedulingPeriod);
                     } catch (final ParseException pe) {
-                        throw new IllegalArgumentException(String.format("Scheduling Period '%s' is not a valid cron expression: %s", config.getSchedulingPeriod(), pe.getMessage()));
+                        throw new IllegalArgumentException(String.format("Scheduling Period '%s' is not a valid cron expression: %s", schedulingPeriod, pe.getMessage()));
                     } catch (final Exception e) {
-                        throw new IllegalArgumentException("Scheduling Period is not a valid cron expression: " + config.getSchedulingPeriod());
+                        throw new IllegalArgumentException("Scheduling Period is not a valid cron expression: " + schedulingPeriod);
                     }
                     break;
             }

@@ -16,10 +16,12 @@
  */
 package org.apache.nifi.controller;
 
+import org.apache.nifi.annotation.notification.PrimaryNodeState;
+import org.apache.nifi.components.ConfigVerificationResult;
+import org.apache.nifi.controller.scheduling.LifecycleState;
 import org.apache.nifi.controller.service.ControllerServiceNode;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.nar.ExtensionManager;
-import org.apache.nifi.components.ConfigVerificationResult;
 import org.apache.nifi.reporting.ReportingContext;
 import org.apache.nifi.reporting.ReportingTask;
 import org.apache.nifi.scheduling.SchedulingStrategy;
@@ -124,5 +126,15 @@ public interface ReportingTaskNode extends ComponentNode {
      * @return a list of results indicating whether or not the given configuration is valid
      */
     List<ConfigVerificationResult> verifyConfiguration(ConfigurationContext context, ComponentLog logger, ExtensionManager extensionManager);
+
+    void start();
+
+    void stop();
+
+    void enable();
+
+    void disable();
+
+    void notifyPrimaryNodeChanged(PrimaryNodeState primaryNodeState, LifecycleState lifecycleState);
 
 }

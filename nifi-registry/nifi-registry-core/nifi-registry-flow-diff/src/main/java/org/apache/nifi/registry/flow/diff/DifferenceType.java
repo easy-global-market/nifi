@@ -129,6 +129,11 @@ public enum DifferenceType {
     PROPERTY_REMOVED("Property Removed"),
 
     /**
+     * The sensitive status of the property changed
+     */
+    PROPERTY_SENSITIVITY_CHANGED("Property Sensitivity Changed"),
+
+    /**
      * Property is unset or set to an explicit value in Flow A but set to (exactly) a parameter reference in Flow B. Note that if Flow A
      * has a property set to "#{param1} abc" and it is changed to "#{param1} abc #{param2}" this would indicate a Difference Type of @{link #PROPERTY_CHANGED}, not
      * PROPERTY_PARAMETERIZED
@@ -168,7 +173,17 @@ public enum DifferenceType {
     /**
      * The Parameter Context inherits from a different collection of Parameter Contexts in each of the flows
      */
-    INHERITED_CONTEXTS_CHANGED("Inhereted Parameter Contexts Changed"),
+    INHERITED_CONTEXTS_CHANGED("Inherited Parameter Contexts Changed"),
+
+    /**
+     * The Parameter Context references a different Parameter Group Name from a Parameter Provider in each of the flows
+     */
+    PARAMETER_GROUP_NAME_CHANGED("Mapped Parameter Group Name Changed"),
+
+    /**
+     * The Parameter Context synchronization to fetched Parameter Groups is different in each of the flows
+     */
+    PARAMETER_PROVIDER_SYNCHRONIZED_CHANGED("Parameter Context Synchronization Changed"),
 
     /**
      * The component has a different value for the Annotation Data in each of the flows

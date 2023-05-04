@@ -16,7 +16,12 @@
  */
 package org.apache.nifi.processors.standard;
 
-import static org.junit.Assert.assertEquals;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
+import org.apache.nifi.flowfile.attributes.StandardFlowFileMediaType;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
@@ -25,13 +30,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.flowfile.attributes.StandardFlowFileMediaType;
-import org.apache.nifi.util.MockFlowFile;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
-
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class TestIdentifyMimeType {
 
@@ -72,7 +72,9 @@ public class TestIdentifyMimeType {
         expectedMimeTypes.put("1.tar.gz", "application/gzip");
         expectedMimeTypes.put("1.jar", "application/java-archive");
         expectedMimeTypes.put("1.xml", "application/xml");
+        expectedMimeTypes.put("1.xhtml", "application/xhtml+xml");
         expectedMimeTypes.put("flowfilev3", StandardFlowFileMediaType.VERSION_3.getMediaType());
+        expectedMimeTypes.put("flowfilev3WithXhtml", StandardFlowFileMediaType.VERSION_3.getMediaType());
         expectedMimeTypes.put("flowfilev1.tar", StandardFlowFileMediaType.VERSION_1.getMediaType());
         expectedMimeTypes.put("fake.csv", "text/csv");
         expectedMimeTypes.put("2.custom", "text/plain");
@@ -93,7 +95,9 @@ public class TestIdentifyMimeType {
         expectedExtensions.put("1.tar.gz", ".gz");
         expectedExtensions.put("1.jar", ".jar");
         expectedExtensions.put("1.xml", ".xml");
+        expectedExtensions.put("1.xhtml", ".xhtml");
         expectedExtensions.put("flowfilev3", "");
+        expectedExtensions.put("flowfilev3WithXhtml", "");
         expectedExtensions.put("flowfilev1.tar", "");
         expectedExtensions.put("fake.csv", ".csv");
         expectedExtensions.put("2.custom", ".txt");
@@ -107,8 +111,8 @@ public class TestIdentifyMimeType {
             final String extension = file.getAttribute("mime.extension");
             final String expectedExtension = expectedExtensions.get(filename);
 
-            assertEquals("Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType, expected, mimeType);
-            assertEquals("Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension, expectedExtension, extension);
+            assertEquals(expected, mimeType, "Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType);
+            assertEquals(expectedExtension, extension, "Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension);
         }
     }
 
@@ -185,7 +189,9 @@ public class TestIdentifyMimeType {
         expectedMimeTypes.put("1.tar.gz", "application/octet-stream");
         expectedMimeTypes.put("1.jar", "application/octet-stream");
         expectedMimeTypes.put("1.xml", "text/plain");
+        expectedMimeTypes.put("1.xhtml", "text/plain");
         expectedMimeTypes.put("flowfilev3", "application/octet-stream");
+        expectedMimeTypes.put("flowfilev3WithXhtml", "application/octet-stream");
         expectedMimeTypes.put("flowfilev1.tar", "application/octet-stream");
         expectedMimeTypes.put("fake.csv", "text/plain");
         expectedMimeTypes.put("2.custom", "custom/abcd");
@@ -206,7 +212,9 @@ public class TestIdentifyMimeType {
         expectedExtensions.put("1.tar.gz", "");
         expectedExtensions.put("1.jar", "");
         expectedExtensions.put("1.xml", "");
+        expectedExtensions.put("1.xhtml", "");
         expectedExtensions.put("flowfilev3", "");
+        expectedExtensions.put("flowfilev3WithXhtml", "");
         expectedExtensions.put("flowfilev1.tar", "");
         expectedExtensions.put("fake.csv", "");
         expectedExtensions.put("2.custom", ".abcd");
@@ -220,8 +228,8 @@ public class TestIdentifyMimeType {
             final String extension = file.getAttribute("mime.extension");
             final String expectedExtension = expectedExtensions.get(filename);
 
-            assertEquals("Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType, expected, mimeType);
-            assertEquals("Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension, expectedExtension, extension);
+            assertEquals(expected, mimeType, "Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType);
+            assertEquals(expectedExtension, extension, "Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension);
         }
     }
 
@@ -268,7 +276,9 @@ public class TestIdentifyMimeType {
         expectedMimeTypes.put("1.tar.gz", "application/octet-stream");
         expectedMimeTypes.put("1.jar", "application/octet-stream");
         expectedMimeTypes.put("1.xml", "text/plain");
+        expectedMimeTypes.put("1.xhtml", "text/plain");
         expectedMimeTypes.put("flowfilev3", "application/octet-stream");
+        expectedMimeTypes.put("flowfilev3WithXhtml", "application/octet-stream");
         expectedMimeTypes.put("flowfilev1.tar", "application/octet-stream");
         expectedMimeTypes.put("fake.csv", "text/plain");
         expectedMimeTypes.put("2.custom", "text/plain");
@@ -289,7 +299,9 @@ public class TestIdentifyMimeType {
         expectedExtensions.put("1.tar.gz", "");
         expectedExtensions.put("1.jar", "");
         expectedExtensions.put("1.xml", "");
+        expectedExtensions.put("1.xhtml", "");
         expectedExtensions.put("flowfilev3", "");
+        expectedExtensions.put("flowfilev3WithXhtml", "");
         expectedExtensions.put("flowfilev1.tar", "");
         expectedExtensions.put("fake.csv", "");
         expectedExtensions.put("2.custom", "");
@@ -303,13 +315,13 @@ public class TestIdentifyMimeType {
             final String extension = file.getAttribute("mime.extension");
             final String expectedExtension = expectedExtensions.get(filename);
 
-            assertEquals("Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType, expected, mimeType);
-            assertEquals("Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension, expectedExtension, extension);
+            assertEquals(expected, mimeType, "Expected " + file + " to have MIME Type " + expected + ", but it was " + mimeType);
+            assertEquals(expectedExtension, extension, "Expected " + file + " to have extension " + expectedExtension + ", but it was " + extension);
         }
     }
 
-    @Test(expected=AssertionError.class)
-    public void testOnlyOneCustomMimeConfigSpecified() throws IOException {
+    @Test
+    public void testOnlyOneCustomMimeConfigSpecified() {
         final TestRunner runner = TestRunners.newTestRunner(new IdentifyMimeType());
 
         String configFile = "src/test/resources/TestIdentifyMimeType/.customConfig.xml";
@@ -319,8 +331,9 @@ public class TestIdentifyMimeType {
         runner.setProperty(IdentifyMimeType.MIME_CONFIG_BODY, configBody);
 
         runner.setThreadCount(1);
-        runner.run();
-
+        assertThrows(AssertionError.class, () -> {
+            runner.run();
+        });
     }
 
 }

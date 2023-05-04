@@ -62,11 +62,9 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -101,6 +99,7 @@ public class ListenHTTPServlet extends HttpServlet {
     public static final String GZIPPED_HEADER = "flowfile-gzipped";
     public static final String PROTOCOL_VERSION_HEADER = "x-nifi-transfer-protocol-version";
     public static final String PROTOCOL_VERSION = "3";
+    protected static final String CONTENT_ENCODING_HEADER = "Content-Encoding";
 
     private final AtomicLong filesReceived = new AtomicLong(0L);
     private final AtomicBoolean spaceAvailable = new AtomicBoolean(true);
@@ -193,7 +192,10 @@ public class ListenHTTPServlet extends HttpServlet {
             }
             response.setHeader("Content-Type", MediaType.TEXT_PLAIN);
 
-            final boolean contentGzipped = Boolean.parseBoolean(request.getHeader(GZIPPED_HEADER));
+            final boolean flowFileGzipped = Boolean.parseBoolean(request.getHeader(GZIPPED_HEADER));
+            final String contentEncoding = request.getHeader(CONTENT_ENCODING_HEADER);
+            final boolean contentEncodingGzip = ACCEPT_ENCODING_VALUE.equals(contentEncoding);
+            final boolean contentGzipped = flowFileGzipped || contentEncodingGzip;
 
             final X509Certificate[] certs = (X509Certificate[]) request.getAttribute("javax.servlet.request.X509Certificate");
             foundSubject = DEFAULT_FOUND_SUBJECT;
@@ -242,13 +244,27 @@ public class ListenHTTPServlet extends HttpServlet {
 
             Set<FlowFile> flowFileSet;
             if (StringUtils.isNotBlank(request.getContentType()) && request.getContentType().contains("multipart/form-data")) {
-                flowFileSet = handleMultipartRequest(request, session, foundSubject, foundIssuer);
+                try {
+                    flowFileSet = handleMultipartRequest(request, session, foundSubject, foundIssuer);
+                } finally {
+                    deleteMultiPartFiles(request);
+                }
             } else {
                 flowFileSet = handleRequest(request, session, foundSubject, foundIssuer, destinationIsLegacyNiFi, contentType, in);
             }
             proceedFlow(request, response, session, foundSubject, foundIssuer, createHold, flowFileSet);
         } catch (final Throwable t) {
             handleException(request, response, session, foundSubject, foundIssuer, t);
+        }
+    }
+
+    private void deleteMultiPartFiles(final HttpServletRequest request) {
+        try {
+            for (final Part part : request.getParts()) {
+                part.delete();
+            }
+        } catch (final Exception e) {
+            logger.warn("Delete MultiPart temporary files failed", e);
         }
     }
 
@@ -266,20 +282,18 @@ public class ListenHTTPServlet extends HttpServlet {
 
     private Set<FlowFile> handleMultipartRequest(HttpServletRequest request, ProcessSession session, String foundSubject, String foundIssuer)
             throws IOException, IllegalStateException, ServletException {
-        if (isRecordProcessing()) {
-            logger.debug("Record processing will not be utilized while processing multipart request. Request URI: {}", request.getRequestURI());
-        }
         Set<FlowFile> flowFileSet = new HashSet<>();
         String tempDir = System.getProperty("java.io.tmpdir");
         request.setAttribute(Request.MULTIPART_CONFIG_ELEMENT, new MultipartConfigElement(tempDir, multipartRequestMaxSize, multipartRequestMaxSize, multipartReadBufferSize));
-        Collection<Part> requestParts = Collections.unmodifiableCollection(request.getParts());
-        final Iterator<Part> parts = requestParts.iterator();
         int i = 0;
-        while (parts.hasNext()) {
-            Part part = parts.next();
+        final Collection<Part> requestParts = request.getParts();
+        for (final Part part : requestParts) {
             FlowFile flowFile = session.create();
-            try (OutputStream flowFileOutputStream = session.write(flowFile)) {
-                StreamUtils.copy(part.getInputStream(), flowFileOutputStream);
+            try (
+                    OutputStream flowFileOutputStream = session.write(flowFile);
+                    InputStream partInputStream = part.getInputStream()
+            ) {
+                StreamUtils.copy(partInputStream, flowFileOutputStream);
             }
             flowFile = saveRequestDetailsAsAttributes(request, session, foundSubject, foundIssuer, flowFile);
             flowFile = savePartDetailsAsAttributes(session, part, flowFile, i, requestParts.size());
@@ -329,9 +343,6 @@ public class ListenHTTPServlet extends HttpServlet {
                         hasMoreData.set(false);
                     }
                 } else {
-                    if (isRecordProcessing()) {
-                        logger.debug("Record processing will not be utilized while processing with unpackager. Request URI: {}", request.getRequestURI());
-                    }
                     attributes.putAll(unpackager.unpackageFlowFile(in, bos));
 
                     if (destinationIsLegacyNiFi) {

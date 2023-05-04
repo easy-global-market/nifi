@@ -198,6 +198,10 @@ class ConfigEncryptionTool {
      *   .*?</userGroupProvider>          -> find everything as needed up until and including occurrence of '</userGroupProvider>'
      */
 
+    private static final String AZURE_USER_GROUP_PROVIDER_CLASS = "org.apache.nifi.authorization.azure.AzureGraphUserGroupProvider"
+    private static final String AZURE_USER_GROUP_PROVIDER_REGEX =
+            /(?s)<userGroupProvider>(?:(?!<userGroupProvider>).)*?<class>\s*org\.apache\.nifi\.authorization\.azure\.AzureGraphUserGroupProvider.*?<\/userGroupProvider>/
+
     private static final String XML_DECLARATION_REGEX = /<\?xml version="1.0" encoding="UTF-8"\?>/
     private static final String WRAPPED_FLOW_XML_CIPHER_TEXT_REGEX = /enc\{[a-fA-F0-9]+?\}/
 
@@ -806,12 +810,12 @@ class ConfigEncryptionTool {
             def filename = "authorizers.xml"
             def doc = getXmlSlurper().parseText(encryptedXml)
             // Find the provider element by class even if it has been renamed
-            def userGroupProvider = doc.userGroupProvider.find {
-                it.'class' as String == LDAP_USER_GROUP_PROVIDER_CLASS
+            def userGroupProvider = doc.userGroupProvider.findAll {
+                it.'class' as String == LDAP_USER_GROUP_PROVIDER_CLASS || it.'class' as String == AZURE_USER_GROUP_PROVIDER_CLASS
             }
             String groupIdentifier = userGroupProvider.identifier.text()
             def passwords = userGroupProvider.property.findAll {
-                it.@name =~ "Password" && it.@encryption != ""
+                ( it.@name =~ "Password" || it.@name =~ "Secret" ) && it.@encryption != ""
             }
 
             if (passwords.isEmpty()) {
@@ -876,7 +880,7 @@ class ConfigEncryptionTool {
 
             passwords.each { password ->
                 if (isVerbose) {
-                    logger.info("Attempting to encrypt ${password.name()} using protection scheme ${protectionScheme}")
+                    logger.info("Attempting to encrypt ${password.name()} using protection scheme ${protectionScheme.path}")
                 }
                 final ProtectedPropertyContext context = getContext(providerFactory, (String) password.@name, groupIdentifier)
                 String encryptedValue = sensitivePropertyProvider.protect((String) password.text().trim(), context)
@@ -906,12 +910,12 @@ class ConfigEncryptionTool {
             def doc = getXmlSlurper().parseText(plainXml)
 
             // Find the provider element by class even if it has been renamed
-            def userGroupProvider = doc.userGroupProvider.find {
-                it.'class' as String == LDAP_USER_GROUP_PROVIDER_CLASS
+            def userGroupProvider = doc.userGroupProvider.findAll {
+                it.'class' as String == LDAP_USER_GROUP_PROVIDER_CLASS || it.'class' as String == AZURE_USER_GROUP_PROVIDER_CLASS
             }
             String groupIdentifier = userGroupProvider.identifier.text()
             def passwords = userGroupProvider.property.findAll {
-                it.@name =~ "Password" && (it.@encryption == "none" || it.@encryption == "") && it.text()
+                (it.@name =~ "Password" || it.@name =~ "Secret") && (it.@encryption == "none" || it.@encryption == "") && it.text()
             }
 
             if (passwords.isEmpty()) {
@@ -924,7 +928,7 @@ class ConfigEncryptionTool {
 
             passwords.each { password ->
                 if (isVerbose) {
-                    logger.info("Attempting to encrypt ${password.name()} using protection scheme ${protectionScheme}")
+                    logger.info("Attempting to encrypt ${password.name()} using protection scheme ${protectionScheme.path}")
                 }
                 final ProtectedPropertyContext context = getContext(providerFactory, (String) password.@name, groupIdentifier)
                 String encryptedValue = sensitivePropertyProvider.protect((String) password.text().trim(), context)
@@ -978,18 +982,18 @@ class ConfigEncryptionTool {
         // Iterate over each -- encrypt and add .protected if populated
         sensitivePropertyKeys.each { String key ->
             if (!plainProperties.getProperty(key)) {
-                logger.debug("Skipping encryption of ${key} because it is empty")
+                logger.debug("Skipping encryption of [${key}] because it is empty")
             } else {
                 String protectedValue = spp.protect(plainProperties.getProperty(key), ProtectedPropertyContext.defaultContext(key))
 
                 // Add the encrypted value
                 encryptedProperties.setProperty(key, protectedValue)
-                logger.info("Protected ${key} with ${protectionScheme} -> \t${protectedValue}")
+                logger.info("Protected [${key}] using [${protectionScheme.path}] -> \t${protectedValue}")
 
                 // Add the protection key ("x.y.z.protected" -> "aes/gcm/{128,256}")
                 String protectionKey = ApplicationPropertiesProtector.getProtectionKey(key)
                 encryptedProperties.setProperty(protectionKey, spp.getIdentifierKey())
-                logger.info("Updated protection key ${protectionKey}")
+                logger.info("Updated protection key [${protectionKey}]")
 
                 keysToSkip << key << protectionKey
             }
@@ -1249,20 +1253,27 @@ class ConfigEncryptionTool {
         String fileContents = originalAuthorizersFile.text
         try {
             def parsedXml = getXmlSlurper().parseText(xmlContent)
-            def provider = parsedXml.userGroupProvider.find { it.'class' as String == LDAP_USER_GROUP_PROVIDER_CLASS }
-            if (provider) {
-                def serializedProvider = serializeXMLFragment(provider)
-                fileContents = fileContents.replaceFirst(LDAP_USER_GROUP_PROVIDER_REGEX, Matcher.quoteReplacement(serializedProvider))
-                return fileContents.split("\n")
-            } else {
-                throw new SAXException("No ldap-user-group-provider element found")
-            }
-        } catch (SAXException e) {
-            logger.error("No provider element with class {} found in XML content; " +
-                    "the file could be empty or the element may be missing or commented out: {}", LDAP_USER_GROUP_PROVIDER_CLASS, e.getMessage())
+            fileContents = serializeProvider(fileContents, parsedXml, LDAP_USER_GROUP_PROVIDER_CLASS, LDAP_USER_GROUP_PROVIDER_REGEX)
+            fileContents = serializeProvider(fileContents, parsedXml, AZURE_USER_GROUP_PROVIDER_CLASS, AZURE_USER_GROUP_PROVIDER_REGEX)
+
             return fileContents.split("\n")
+        } catch (SAXException e) {
+            logger.error("Returning original file contents.", e.getMessage())
+            return originalAuthorizersFile.text.split("\n")
         }
     }
+
+    private static String serializeProvider(String fileContents, groovy.xml.slurpersupport.NodeChild parsedXml, String providerClass, String providerRegex) {
+        def provider = parsedXml.userGroupProvider.find { it.'class' as String == providerClass }
+
+        if (provider) {
+            def serializedProvider = serializeXMLFragment(provider)
+            return fileContents.replaceFirst(providerRegex, Matcher.quoteReplacement(serializedProvider))
+        } else {
+            return fileContents
+        }
+    }
+
 
     /**
      * Helper method which returns true if it is "safe" to write to the provided file.
@@ -1319,7 +1330,7 @@ class ConfigEncryptionTool {
     boolean niFiPropertiesAreEncrypted() {
         if (niFiPropertiesPath) {
             try {
-                def nfp = getNiFiPropertiesLoader(keyHex).readProtectedPropertiesFromDisk(new File(niFiPropertiesPath))
+                def nfp = getNiFiPropertiesLoader(keyHex).loadProtectedProperties(new File(niFiPropertiesPath))
                 return nfp.hasProtectedKeys()
             } catch (SensitivePropertyProtectionException | IOException e) {
                 logger.debug("Read Protected Properties failed {}", e.getMessage())

@@ -54,6 +54,17 @@ public class ITFetchAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT 
     }
 
     @Test
+    public void testFetchBlobWithSimpleNameUsingProxyConfigurationService() throws Exception {
+        uploadBlob(BLOB_NAME, BLOB_DATA);
+
+        configureProxyService();
+
+        runProcessor();
+
+        assertSuccess(BLOB_NAME, BLOB_DATA);
+    }
+
+    @Test
     public void testFetchBlobWithCompoundName() throws Exception {
         String blobName = "dir1/dir2/blob1";
         runner.setProperty(DeleteAzureBlobStorage_v12.BLOB_NAME, blobName);
@@ -180,7 +191,8 @@ public class ITFetchAzureBlobStorage_v12 extends AbstractAzureBlobStorage_v12IT 
 
         MockFlowFile flowFile = runner.getFlowFilesForRelationship(FetchAzureBlobStorage_v12.REL_SUCCESS).get(0);
 
-        assertFlowFileBlobAttributes(flowFile, getContainerName(), blobName, originalLength);
+        assertFlowFileCommonBlobAttributes(flowFile, getContainerName(), blobName);
+        assertFlowFileResultBlobAttributes(flowFile, originalLength);
 
         flowFile.assertContentEquals(blobData);
     }
